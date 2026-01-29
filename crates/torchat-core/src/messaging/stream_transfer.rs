@@ -373,7 +373,9 @@ mod tests {
     #[test]
     fn test_sanitize_filename() {
         assert_eq!(sanitize_filename("test.txt"), "test.txt");
-        assert_eq!(sanitize_filename("../../../etc/passwd"), "______etc_passwd");
+        // After replacing /, \, \0 with _ and trimming leading dots:
+        // "../../../etc/passwd" -> ".._.._.._etc_passwd" -> "_.._.._etc_passwd"
+        assert_eq!(sanitize_filename("../../../etc/passwd"), "_.._.._etc_passwd");
         assert_eq!(sanitize_filename(".hidden"), "hidden");
         assert_eq!(sanitize_filename("file/with/slashes"), "file_with_slashes");
     }
@@ -384,5 +386,127 @@ mod tests {
         assert!(is_file_transfer_magic(magic));
         assert!(!is_file_transfer_magic(b"NOTMAGIC"));
         assert!(!is_file_transfer_magic(&[1, 2, 3]));
+    }
+
+    #[test]
+    fn test_metadata_serialization() {
+        let metadata = StreamFileMetadata {
+            transfer_id: [1u8; 16],
+            filename: "test_file.txt".to_string(),
+            size: 1024,
+            hash: [2u8; 32],
+            sender_address: "test.onion".to_string(),
+        };
+
+        // Serialize
+        let bytes = bincode::serialize(&metadata).unwrap();
+        assert!(bytes.len() < MAX_METADATA_SIZE);
+
+        // Deserialize
+        let decoded: StreamFileMetadata = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded.filename, "test_file.txt");
+        assert_eq!(decoded.size, 1024);
+        assert_eq!(decoded.transfer_id, [1u8; 16]);
+        assert_eq!(decoded.hash, [2u8; 32]);
+        assert_eq!(decoded.sender_address, "test.onion");
+    }
+
+    #[tokio::test]
+    async fn test_local_file_transfer() {
+        use tokio::net::{TcpListener, TcpStream};
+        use std::io::Write as _;
+
+        // Create temp directory and test file
+        let temp_dir = std::env::temp_dir().join("torchat_test");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let test_content = b"Hello, this is a test file for TorChat file transfer!";
+        let test_file_path = temp_dir.join("test_input.txt");
+        {
+            let mut f = std::fs::File::create(&test_file_path).unwrap();
+            f.write_all(test_content).unwrap();
+        }
+
+        // Compute expected hash
+        let expected_hash = compute_file_hash(&test_file_path).await.unwrap();
+
+        // Create metadata
+        let metadata = StreamFileMetadata {
+            transfer_id: [42u8; 16],
+            filename: "test_input.txt".to_string(),
+            size: test_content.len() as u64,
+            hash: expected_hash,
+            sender_address: "sender.onion".to_string(),
+        };
+
+        // Start a local TCP listener
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Spawn receiver task
+        let output_dir = temp_dir.join("received");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let output_dir_clone = output_dir.clone();
+
+        let receiver_handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+
+            // Read and verify magic bytes
+            let mut magic_buf = [0u8; 8];
+            stream.read_exact(&mut magic_buf).await.unwrap();
+            assert!(is_file_transfer_magic(&magic_buf));
+
+            // Receive file
+            receive_file_stream(&mut stream, output_dir_clone).await
+        });
+
+        // Spawn sender task
+        let metadata_bytes = bincode::serialize(&metadata).unwrap();
+        let test_file_path_clone = test_file_path.clone();
+
+        let sender_handle = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+
+            // Send magic bytes
+            stream.write_all(FILE_TRANSFER_MAGIC).await.unwrap();
+
+            // Send metadata length
+            let metadata_len = metadata_bytes.len() as u32;
+            stream.write_all(&metadata_len.to_be_bytes()).await.unwrap();
+
+            // Send metadata
+            stream.write_all(&metadata_bytes).await.unwrap();
+
+            // Send file content
+            let content = tokio::fs::read(&test_file_path_clone).await.unwrap();
+            stream.write_all(&content).await.unwrap();
+            stream.flush().await.unwrap();
+
+            // Wait for ack
+            let mut ack = [0u8; 1];
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                stream.read_exact(&mut ack)
+            ).await;
+
+            ack[0]
+        });
+
+        // Wait for both tasks
+        let (receiver_result, sender_ack) = tokio::join!(receiver_handle, sender_handle);
+
+        let result = receiver_result.unwrap().unwrap();
+        assert!(result.success, "Transfer should succeed");
+        assert!(result.output_path.is_some());
+
+        // Verify received file content
+        let received_content = std::fs::read(result.output_path.unwrap()).unwrap();
+        assert_eq!(received_content, test_content);
+
+        // Verify ack
+        assert_eq!(sender_ack.unwrap(), 0x01, "Should receive success ack");
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
