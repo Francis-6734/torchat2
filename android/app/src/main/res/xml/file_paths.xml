@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+   FileProvider paths for sharing files securely.
+
+   Used for sharing QR codes of identity and other exports.
+-->
+<paths>
+    <!-- Cache directory for temporary files -->
+    <cache-path name="cache" path="." />
+
+    <!-- Files directory for exports -->
+    <files-path name="files" path="." />
+
+    <!-- External cache for sharing -->
+    <external-cache-path name="external_cache" path="." />
+</paths>

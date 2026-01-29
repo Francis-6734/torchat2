@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+   TorChat data extraction rules.
+
+   Security: No cloud backup is allowed for any app data.
+   This prevents sensitive cryptographic keys and messages
+   from being uploaded to Google servers.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <!-- Disallow all cloud backup for security -->
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <!-- Disallow device-to-device transfer -->
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
+    </device-transfer>
+</data-extraction-rules>

@@ -1,0 +1,37 @@
+[package]
+name = "torchat-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+torchat-core.path = "../torchat-core"
+
+# Web framework
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["trace", "cors", "fs"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"
+rand = { workspace = true }
+base64 = "0.22"
+
+[[bin]]
+name = "torchat-web"
+path = "src/main.rs"

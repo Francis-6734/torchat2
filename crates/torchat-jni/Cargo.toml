@@ -1,0 +1,35 @@
+[package]
+name = "torchat-jni"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "JNI bindings for TorChat core library"
+
+[lib]
+name = "torchat_jni"
+crate-type = ["cdylib"]
+
+[dependencies]
+torchat-core = { path = "../torchat-core", features = ["voice"] }
+
+# JNI bindings
+jni = "0.21"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Logging
+tracing = "0.1"
+android_logger = "0.13"
+log = "0.4"
+
+# Audio codec (for voice calls)
+audiopus = "0.3.0-rc.0"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"

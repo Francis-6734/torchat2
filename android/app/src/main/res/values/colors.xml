@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Primary colors - Purple theme for privacy/security -->
+    <color name="primary">#7B1FA2</color>
+    <color name="primary_dark">#4A148C</color>
+    <color name="primary_light">#BA68C8</color>
+    <color name="accent">#00BFA5</color>
+
+    <!-- Light theme -->
+    <color name="background">#FAFAFA</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="on_primary">#FFFFFF</color>
+    <color name="on_background">#212121</color>
+    <color name="on_surface">#212121</color>
+
+    <!-- Dark theme -->
+    <color name="background_dark">#121212</color>
+    <color name="surface_dark">#1E1E1E</color>
+    <color name="on_background_dark">#E0E0E0</color>
+    <color name="on_surface_dark">#E0E0E0</color>
+
+    <!-- Status colors -->
+    <color name="online">#4CAF50</color>
+    <color name="offline">#9E9E9E</color>
+    <color name="error">#F44336</color>
+    <color name="warning">#FF9800</color>
+
+    <!-- Message bubbles -->
+    <color name="bubble_outgoing">#7B1FA2</color>
+    <color name="bubble_incoming">#E0E0E0</color>
+    <color name="bubble_incoming_dark">#2E2E2E</color>
+
+    <!-- Call screen -->
+    <color name="call_background">#1A1A2E</color>
+    <color name="call_accept">#4CAF50</color>
+    <color name="call_decline">#F44336</color>
+</resources>

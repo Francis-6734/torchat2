@@ -1,0 +1,23 @@
+[package]
+name = "torchat-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Store-and-forward relay server for TorChat 2.0 offline messaging"
+
+[[bin]]
+name = "torchat-relay"
+path = "src/main.rs"
+
+[dependencies]
+torchat-core.workspace = true
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+sha2.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

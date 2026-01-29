@@ -1,0 +1,83 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/torchat-core",
+    "crates/torchat-cli",
+    "crates/torchat-relay",
+    "crates/torchat-web",
+    "crates/torchat-jni",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["TorChat Contributors"]
+rust-version = "1.75"
+
+[workspace.dependencies]
+# Cryptography - audited primitives only (spec section 5)
+ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
+x25519-dalek = { version = "2", features = ["zeroize", "static_secrets"] }
+sha2 = "0.10"
+sha3 = "0.10"
+hmac = "0.12"
+hkdf = "0.12"
+pbkdf2 = "0.12"
+chacha20poly1305 = "0.10"
+rand = "0.8"
+rand_core = "0.6"
+zeroize = { version = "1", features = ["derive"] }
+
+# Tor integration
+arti-client = { version = "0.11", default-features = false, features = ["tokio", "onion-service-client"] }
+tor-rtcompat = { version = "0.9", features = ["tokio"] }
+
+# Storage - SQLCipher for encrypted local data (spec section 10)
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Encoding
+base32 = "0.5"
+base64 = "0.22"
+hex = "0.4"
+
+# Time
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+
+# Audio codec for voice calls
+audiopus = "0.3.0-rc.0"
+
+# System info
+hostname = "0.4"
+
+# Internal crates
+torchat-core = { path = "crates/torchat-core" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+# Faster builds for development
+opt-level = 0
+debug = true

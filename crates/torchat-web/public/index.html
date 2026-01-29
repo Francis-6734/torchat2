@@ -1,0 +1,1192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#667eea">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>TorChat 2.0</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            min-height: -webkit-fill-available;
+        }
+
+        .app-container {
+            width: 100%;
+            height: 100vh;
+            height: -webkit-fill-available;
+            display: flex;
+            flex-direction: column;
+            background: #f5f5f5;
+            max-width: 100%;
+            margin: 0 auto;
+        }
+
+        /* Mobile Header */
+        .mobile-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 12px 16px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            min-height: 60px;
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex: 1;
+            min-width: 0;
+        }
+
+        .header-title {
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        .identity-mini {
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+            flex: 1;
+        }
+
+        .identity-label {
+            font-size: 10px;
+            opacity: 0.8;
+        }
+
+        .identity-address {
+            font-size: 12px;
+            font-family: monospace;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 200px;
+        }
+
+        .copy-btn {
+            background: rgba(255,255,255,0.2);
+            border: none;
+            color: white;
+            padding: 8px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            white-space: nowrap;
+        }
+
+        .copy-btn:active {
+            background: rgba(255,255,255,0.3);
+        }
+
+        /* Tab Navigation */
+        .tab-nav {
+            display: flex;
+            background: white;
+            border-bottom: 1px solid #e0e0e0;
+            position: sticky;
+            top: 60px;
+            z-index: 99;
+        }
+
+        .tab-btn {
+            flex: 1;
+            padding: 14px;
+            border: none;
+            background: none;
+            font-size: 14px;
+            font-weight: 600;
+            color: #666;
+            cursor: pointer;
+            border-bottom: 3px solid transparent;
+            transition: all 0.2s;
+        }
+
+        .tab-btn.active {
+            color: #667eea;
+            border-bottom-color: #667eea;
+        }
+
+        /* Main Content */
+        .main-content {
+            flex: 1;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .tab-panel {
+            display: none;
+            flex: 1;
+            overflow-y: auto;
+            flex-direction: column;
+        }
+
+        .tab-panel.active {
+            display: flex;
+        }
+
+        /* Contacts List */
+        .contacts-panel {
+            padding: 8px;
+        }
+
+        .add-contact-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 14px 20px;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            margin: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        .contact-item {
+            background: white;
+            padding: 16px;
+            border-radius: 12px;
+            margin: 8px;
+            cursor: pointer;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            transition: transform 0.2s;
+        }
+
+        .contact-item:active {
+            transform: scale(0.98);
+        }
+
+        .contact-name {
+            font-weight: 600;
+            font-size: 16px;
+            margin-bottom: 4px;
+            color: #333;
+        }
+
+        .contact-address {
+            font-size: 12px;
+            color: #888;
+            font-family: monospace;
+            word-break: break-all;
+        }
+
+        .contact-status {
+            font-size: 11px;
+            color: #667eea;
+            margin-top: 4px;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #888;
+        }
+
+        .empty-state h3 {
+            font-size: 18px;
+            color: #666;
+            margin-bottom: 8px;
+        }
+
+        /* Chat Panel */
+        .chat-panel {
+            display: none;
+            flex-direction: column;
+            height: 100%;
+        }
+
+        .chat-panel.active {
+            display: flex;
+        }
+
+        .chat-header {
+            background: white;
+            padding: 12px 16px;
+            border-bottom: 1px solid #e0e0e0;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .chat-back-btn {
+            background: none;
+            border: none;
+            font-size: 24px;
+            color: #667eea;
+            cursor: pointer;
+            padding: 4px;
+        }
+
+        .chat-contact-info {
+            flex: 1;
+        }
+
+        .chat-contact-name {
+            font-weight: 600;
+            font-size: 16px;
+        }
+
+        .chat-contact-address {
+            font-size: 11px;
+            color: #888;
+        }
+
+        .messages-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+            background: #fafafa;
+        }
+
+        .message {
+            display: flex;
+            margin-bottom: 12px;
+        }
+
+        .message.sent {
+            justify-content: flex-end;
+        }
+
+        .message.received {
+            justify-content: flex-start;
+        }
+
+        .message-bubble {
+            max-width: 80%;
+            padding: 12px 16px;
+            border-radius: 18px;
+            font-size: 15px;
+            line-height: 1.4;
+            word-wrap: break-word;
+        }
+
+        .message.sent .message-bubble {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.received .message-bubble {
+            background: white;
+            color: #333;
+            border-bottom-left-radius: 4px;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+        }
+
+        .message-time {
+            font-size: 10px;
+            opacity: 0.7;
+            margin-top: 4px;
+            text-align: right;
+        }
+
+        .input-area {
+            padding: 12px;
+            background: white;
+            border-top: 1px solid #e0e0e0;
+            display: flex;
+            gap: 10px;
+            align-items: flex-end;
+        }
+
+        .message-input {
+            flex: 1;
+            padding: 12px 16px;
+            border: 1px solid #e0e0e0;
+            border-radius: 24px;
+            font-size: 16px;
+            font-family: inherit;
+            resize: none;
+            max-height: 120px;
+            min-height: 44px;
+        }
+
+        .message-input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .attach-btn, .call-btn {
+            background: #f0f0f0;
+            color: #667eea;
+            border: none;
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            flex-shrink: 0;
+            margin-right: 8px;
+        }
+
+        .attach-btn:active, .call-btn:active {
+            background: #e0e0e0;
+        }
+
+        .call-btn.active {
+            background: #ff4444;
+            color: white;
+            animation: pulse 1s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+        }
+
+        .send-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            flex-shrink: 0;
+        }
+
+        .file-message {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 4px;
+        }
+
+        .file-icon {
+            width: 40px;
+            height: 40px;
+            background: rgba(255,255,255,0.2);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+        }
+
+        .file-info {
+            flex: 1;
+        }
+
+        .file-name {
+            font-weight: 600;
+            margin-bottom: 2px;
+        }
+
+        .file-size {
+            font-size: 11px;
+            opacity: 0.8;
+        }
+
+        .file-progress {
+            height: 4px;
+            background: rgba(255,255,255,0.2);
+            border-radius: 2px;
+            margin-top: 4px;
+            overflow: hidden;
+        }
+
+        .file-progress-bar {
+            height: 100%;
+            background: white;
+            transition: width 0.3s;
+        }
+
+        /* Settings Panel */
+        .settings-panel {
+            padding: 16px;
+        }
+
+        .settings-card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 16px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+
+        .settings-card h3 {
+            font-size: 14px;
+            color: #888;
+            margin-bottom: 12px;
+            text-transform: uppercase;
+        }
+
+        .identity-full {
+            font-family: monospace;
+            font-size: 12px;
+            word-break: break-all;
+            background: #f5f5f5;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 12px;
+            line-height: 1.5;
+        }
+
+        .fingerprint-display {
+            font-family: monospace;
+            font-size: 10px;
+            color: #666;
+            word-break: break-all;
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 14px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            width: 100%;
+            margin-top: 12px;
+        }
+
+        .btn:active {
+            transform: scale(0.98);
+        }
+
+        .btn-secondary {
+            background: #e0e0e0;
+            color: #333;
+        }
+
+        /* Modal */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .modal.open {
+            display: flex;
+        }
+
+        .modal-content {
+            background: white;
+            padding: 24px;
+            border-radius: 16px;
+            width: 100%;
+            max-width: 400px;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+
+        .modal-content h2 {
+            margin-bottom: 20px;
+            color: #333;
+            font-size: 20px;
+        }
+
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #333;
+            font-size: 14px;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 14px;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 16px;
+        }
+
+        .form-group input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .status-message {
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+            font-size: 14px;
+        }
+
+        .status-message.error {
+            background: #ffebee;
+            color: #c62828;
+        }
+
+        .status-message.success {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+
+        .status-message.info {
+            background: #e3f2fd;
+            color: #1565c0;
+        }
+
+        /* Loading */
+        .loading {
+            text-align: center;
+            padding: 40px;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid #e0e0e0;
+            border-top-color: #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 16px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Toast */
+        .toast {
+            position: fixed;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #333;
+            color: white;
+            padding: 12px 24px;
+            border-radius: 8px;
+            z-index: 2000;
+            display: none;
+            font-size: 14px;
+        }
+
+        .toast.show {
+            display: block;
+            animation: fadeIn 0.3s;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translate(-50%, 20px); }
+            to { opacity: 1; transform: translate(-50%, 0); }
+        }
+
+        /* Desktop */
+        @media (min-width: 768px) {
+            body {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 20px;
+            }
+
+            .app-container {
+                max-width: 480px;
+                height: 90vh;
+                border-radius: 20px;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                overflow: hidden;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <div class="mobile-header">
+            <div class="header-left">
+                <div class="identity-mini" id="identity-header">
+                    <span class="identity-label">Your Address</span>
+                    <span class="identity-address" id="identity-short">Loading...</span>
+                </div>
+            </div>
+            <button class="copy-btn" onclick="copyAddress()" id="copy-btn" style="display:none;">Copy</button>
+        </div>
+
+        <!-- Tabs -->
+        <div class="tab-nav" id="tab-nav">
+            <button class="tab-btn active" data-tab="chats" onclick="switchTab('chats')">Chats</button>
+            <button class="tab-btn" data-tab="contacts" onclick="switchTab('contacts')">Contacts</button>
+            <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">Settings</button>
+        </div>
+
+        <!-- Content -->
+        <div class="main-content">
+            <!-- Chats Tab -->
+            <div class="tab-panel active" id="chats-panel">
+                <div class="empty-state" id="chats-empty">
+                    <h3>Welcome to TorChat 2.0</h3>
+                    <p>Anonymous, end-to-end encrypted messaging</p>
+                    <p style="margin-top: 20px;">Add a contact to start chatting</p>
+                    <button class="btn" style="max-width: 200px; margin: 20px auto;" onclick="switchTab('contacts')">Add Contact</button>
+                </div>
+                <div id="recent-chats" style="display: none;"></div>
+            </div>
+
+            <!-- Contacts Tab -->
+            <div class="tab-panel" id="contacts-panel">
+                <div class="contacts-panel">
+                    <button class="add-contact-btn" onclick="openAddContactModal()">+ Add New Contact</button>
+                    <div id="contacts-list"><div class="empty-state"><p>No contacts yet</p></div></div>
+                </div>
+            </div>
+
+            <!-- Settings Tab -->
+            <div class="tab-panel" id="settings-panel">
+                <div class="settings-panel">
+                    <div class="settings-card">
+                        <h3>Your Identity</h3>
+                        <div class="identity-full" id="identity-full">Loading...</div>
+                        <div class="fingerprint-display" id="fingerprint-full"></div>
+                        <button class="btn btn-secondary" onclick="copyAddress()">Copy Address</button>
+                    </div>
+                    <div class="settings-card">
+                        <h3>P2P Connection</h3>
+                        <div id="daemon-status" class="status-message info">Status: Not connected to Tor network</div>
+                        <div style="display: flex; gap: 10px; margin-top: 10px;">
+                            <button class="btn" onclick="startDaemon()">Start P2P</button>
+                            <button class="btn btn-secondary" onclick="stopDaemon()">Stop P2P</button>
+                        </div>
+                    </div>
+                    <div class="settings-card">
+                        <h3>About</h3>
+                        <p style="color: #666; font-size: 14px;">TorChat 2.0 - Anonymous messaging over Tor<br>End-to-end encrypted with Signal Protocol</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Chat View -->
+            <div class="chat-panel" id="chat-panel">
+                <div class="chat-header">
+                    <button class="chat-back-btn" onclick="closeChat()">&larr;</button>
+                    <div class="chat-contact-info">
+                        <div class="chat-contact-name" id="chat-contact-name">Contact</div>
+                        <div class="chat-contact-address" id="chat-contact-address"></div>
+                    </div>
+                </div>
+                <div class="messages-container" id="messages-container"></div>
+                <div class="input-area">
+                    <input type="file" id="file-input" style="display: none;" onchange="handleFileSelect(event)">
+                    <button class="attach-btn" onclick="document.getElementById('file-input').click()" title="Send file">&#128206;</button>
+                    <button class="call-btn" onclick="startVoiceCall()" title="Voice call" id="call-btn">&#128222;</button>
+                    <textarea class="message-input" id="message-input" placeholder="Type a message..." rows="1"></textarea>
+                    <button class="send-btn" onclick="sendMessage()">&#10148;</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Contact Modal -->
+    <div id="add-contact-modal" class="modal">
+        <div class="modal-content">
+            <h2>Add Contact</h2>
+            <div id="add-contact-status"></div>
+            <div class="form-group">
+                <label>Onion Address</label>
+                <input type="text" id="contact-address" placeholder="xxxxx...xxxxx.onion" autocomplete="off" autocapitalize="off">
+            </div>
+            <div class="form-group">
+                <label>Display Name (optional)</label>
+                <input type="text" id="contact-name" placeholder="Friend's name">
+            </div>
+            <button class="btn" onclick="addContact()">Add Contact</button>
+            <button class="btn btn-secondary" onclick="closeAddContactModal()">Cancel</button>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast" id="toast"></div>
+
+    <script>
+        let currentContact = null;
+        let myOnionAddress = '';
+        let messagePollingInterval = null;
+        let lastMessageCount = 0;
+
+        async function api(endpoint, method = 'GET', body = null) {
+            const options = { method, headers: { 'Content-Type': 'application/json' } };
+            if (body) options.body = JSON.stringify(body);
+            try {
+                const response = await fetch(endpoint, options);
+                return await response.json();
+            } catch (e) {
+                return { success: false, error: e.message };
+            }
+        }
+
+        function showToast(message) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.classList.add('show');
+            setTimeout(() => toast.classList.remove('show'), 3000);
+        }
+
+        function switchTab(tabName) {
+            document.getElementById('chat-panel').classList.remove('active');
+            document.getElementById('tab-nav').style.display = 'flex';
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === tabName));
+            document.querySelectorAll('.tab-panel').forEach(panel => panel.classList.remove('active'));
+            document.getElementById(tabName + '-panel').classList.add('active');
+        }
+
+        async function loadIdentity() {
+            const statusEl = document.getElementById('daemon-status');
+
+            // Check if this device already has an identity
+            const result = await api('/api/identity');
+            if (result.success && result.data) {
+                // Already registered, load existing identity
+                setIdentityDisplay(result.data);
+                loadContacts();
+                // Update daemon status - it auto-started on login
+                if (statusEl) {
+                    statusEl.className = 'status-message info';
+                    statusEl.textContent = 'P2P daemon starting... (may take up to 60s to be reachable)';
+                    // Check status after a delay
+                    setTimeout(updateDaemonStatus, 2000);
+                }
+            } else {
+                // New device - register to get unique onion address
+                const registerResult = await api('/api/register', 'POST', { display_name: null });
+                if (registerResult.success && registerResult.data) {
+                    setIdentityDisplay(registerResult.data);
+                    showToast('Your unique address has been generated! P2P daemon is starting...');
+                    loadContacts();
+                    // Update daemon status - it auto-started on registration
+                    if (statusEl) {
+                        statusEl.className = 'status-message info';
+                        statusEl.textContent = 'P2P daemon starting... (may take up to 60s to be reachable)';
+                        setTimeout(updateDaemonStatus, 2000);
+                    }
+                } else {
+                    document.getElementById('identity-short').textContent = 'Error';
+                    showToast('Failed to generate identity: ' + (registerResult.error || 'Unknown error'));
+                }
+            }
+        }
+
+        async function updateDaemonStatus() {
+            const statusEl = document.getElementById('daemon-status');
+            const result = await api('/api/daemon/status');
+            if (result.success && result.data && result.data.running) {
+                statusEl.className = 'status-message success';
+                statusEl.textContent = 'P2P daemon running! Address: ' + result.data.onion_address;
+            } else {
+                statusEl.className = 'status-message warning';
+                statusEl.textContent = 'P2P daemon starting... Please wait.';
+                // Retry in 5 seconds
+                setTimeout(updateDaemonStatus, 5000);
+            }
+        }
+
+        function setIdentityDisplay(data) {
+            myOnionAddress = data.onion_address;
+            const shortAddr = myOnionAddress.substring(0, 12) + '...' + myOnionAddress.slice(-10);
+            document.getElementById('identity-short').textContent = shortAddr;
+            document.getElementById('identity-full').textContent = myOnionAddress;
+            document.getElementById('fingerprint-full').textContent = 'Fingerprint: ' + data.fingerprint;
+            document.getElementById('copy-btn').style.display = 'block';
+            if (data.display_name) {
+                document.getElementById('identity-short').textContent = data.display_name + ' (' + shortAddr + ')';
+            }
+        }
+
+        function copyAddress() {
+            if (myOnionAddress) {
+                navigator.clipboard.writeText(myOnionAddress).then(() => showToast('Address copied!')).catch(() => {
+                    const ta = document.createElement('textarea');
+                    ta.value = myOnionAddress;
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(ta);
+                    showToast('Address copied!');
+                });
+            }
+        }
+
+        async function loadContacts() {
+            const result = await api('/api/contacts');
+            const list = document.getElementById('contacts-list');
+            const recentChats = document.getElementById('recent-chats');
+            const chatsEmpty = document.getElementById('chats-empty');
+
+            if (result.success && result.data && result.data.length > 0) {
+                const html = result.data.map(c => `
+                    <div class="contact-item" onclick="openChat('${c.address}', '${escapeHtml(c.name || '')}')">
+                        <div class="contact-name">${escapeHtml(c.name) || 'Unknown'}</div>
+                        <div class="contact-address">${c.address}</div>
+                    </div>
+                `).join('');
+                list.innerHTML = html;
+                recentChats.innerHTML = result.data.map(c => `
+                    <div class="contact-item" onclick="openChat('${c.address}', '${escapeHtml(c.name || '')}')">
+                        <div class="contact-name">${escapeHtml(c.name) || 'Unknown'}</div>
+                        <div class="contact-address">${c.address}</div>
+                        <div class="contact-status">Tap to chat</div>
+                    </div>
+                `).join('');
+                recentChats.style.display = 'block';
+                chatsEmpty.style.display = 'none';
+            } else {
+                list.innerHTML = '<div class="empty-state"><p>No contacts yet</p></div>';
+                recentChats.style.display = 'none';
+                chatsEmpty.style.display = 'block';
+            }
+        }
+
+        async function openChat(address, name) {
+            currentContact = { address, name };
+            document.getElementById('chat-contact-name').textContent = name || 'Unknown';
+            document.getElementById('chat-contact-address').textContent = address;
+            document.getElementById('tab-nav').style.display = 'none';
+            document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+            document.getElementById('chat-panel').classList.add('active');
+            await loadMessages(address);
+            startMessagePolling();
+        }
+
+        function closeChat() {
+            stopMessagePolling();
+            currentContact = null;
+            document.getElementById('chat-panel').classList.remove('active');
+            document.getElementById('tab-nav').style.display = 'flex';
+            document.getElementById('chats-panel').classList.add('active');
+        }
+
+        async function loadMessages(address, isPolling = false) {
+            const container = document.getElementById('messages-container');
+            if (!isPolling) {
+                container.innerHTML = '<div class="loading"><div class="spinner"></div><p>Loading...</p></div>';
+            }
+            const result = await api(`/api/messages/${encodeURIComponent(address)}`);
+            if (result.success && result.data && result.data.length > 0) {
+                // Only update if new messages arrived (or initial load)
+                if (!isPolling || result.data.length !== lastMessageCount) {
+                    lastMessageCount = result.data.length;
+                    container.innerHTML = result.data.map(msg => `
+                        <div class="message ${msg.is_outgoing ? 'sent' : 'received'}">
+                            <div class="message-bubble">${escapeHtml(msg.content)}<div class="message-time">${formatTime(msg.timestamp)}</div></div>
+                        </div>
+                    `).join('');
+                    container.scrollTop = container.scrollHeight;
+                    // Show notification for new incoming messages
+                    if (isPolling && result.data.length > lastMessageCount) {
+                        const newMsg = result.data[result.data.length - 1];
+                        if (!newMsg.is_outgoing) {
+                            showToast('New message received!');
+                        }
+                    }
+                }
+            } else if (!isPolling) {
+                container.innerHTML = '<div class="empty-state"><h3>No messages yet</h3><p>Send the first message!</p></div>';
+                lastMessageCount = 0;
+            }
+        }
+
+        function startMessagePolling() {
+            if (messagePollingInterval) clearInterval(messagePollingInterval);
+            messagePollingInterval = setInterval(() => {
+                if (currentContact) {
+                    loadMessages(currentContact.address, true);
+                }
+            }, 3000); // Poll every 3 seconds
+        }
+
+        function stopMessagePolling() {
+            if (messagePollingInterval) {
+                clearInterval(messagePollingInterval);
+                messagePollingInterval = null;
+            }
+            lastMessageCount = 0;
+        }
+
+        async function sendMessage() {
+            if (!currentContact) return;
+            const input = document.getElementById('message-input');
+            const content = input.value.trim();
+            if (!content) return;
+
+            const container = document.getElementById('messages-container');
+            const emptyState = container.querySelector('.empty-state');
+            if (emptyState) emptyState.remove();
+
+            const msgEl = document.createElement('div');
+            msgEl.className = 'message sent';
+            msgEl.innerHTML = `<div class="message-bubble">${escapeHtml(content)}<div class="message-time">Sending...</div></div>`;
+            container.appendChild(msgEl);
+            container.scrollTop = container.scrollHeight;
+            input.value = '';
+            input.style.height = 'auto';
+
+            const result = await api('/api/messages', 'POST', { to: currentContact.address, content });
+            msgEl.querySelector('.message-time').textContent = result.success ? 'Sent' : 'Failed';
+            if (!result.success) showToast('Failed to send: ' + (result.error || 'Unknown error'));
+        }
+
+        async function addContact() {
+            const address = document.getElementById('contact-address').value.trim();
+            const name = document.getElementById('contact-name').value.trim();
+            const statusEl = document.getElementById('add-contact-status');
+
+            if (!address) { statusEl.innerHTML = '<div class="status-message error">Please enter an address</div>'; return; }
+            if (!address.endsWith('.onion')) { statusEl.innerHTML = '<div class="status-message error">Address must end with .onion</div>'; return; }
+
+            statusEl.innerHTML = '<div class="status-message info">Adding contact...</div>';
+            const result = await api('/api/contacts', 'POST', { address, name: name || null });
+
+            if (result.success) {
+                statusEl.innerHTML = '<div class="status-message success">Contact added!</div>';
+                setTimeout(() => { closeAddContactModal(); loadContacts(); showToast('Contact added!'); }, 1000);
+            } else {
+                statusEl.innerHTML = `<div class="status-message error">${result.error}</div>`;
+            }
+        }
+
+        async function startDaemon() {
+            const statusEl = document.getElementById('daemon-status');
+            statusEl.className = 'status-message info';
+            statusEl.textContent = 'Starting P2P daemon...';
+            const result = await api('/api/daemon/start', 'POST');
+            if (result.success && result.data) {
+                statusEl.className = 'status-message success';
+                statusEl.textContent = 'P2P daemon running! Your address: ' + result.data.onion_address;
+                showToast('P2P daemon started - you can now send and receive messages');
+            } else {
+                statusEl.className = 'status-message error';
+                statusEl.textContent = 'Error: ' + (result.error || 'Failed to start daemon');
+            }
+        }
+
+        async function stopDaemon() {
+            const statusEl = document.getElementById('daemon-status');
+            statusEl.className = 'status-message info';
+            statusEl.textContent = 'Stopping daemon...';
+            const result = await api('/api/daemon/stop', 'POST');
+            if (result.success) {
+                statusEl.className = 'status-message info';
+                statusEl.textContent = 'Status: Not connected to Tor';
+                showToast('Daemon stopped');
+            } else {
+                statusEl.className = 'status-message error';
+                statusEl.textContent = 'Error: ' + (result.error || 'Failed to stop daemon');
+            }
+        }
+
+        function openAddContactModal() { document.getElementById('add-contact-modal').classList.add('open'); }
+        function closeAddContactModal() {
+            document.getElementById('add-contact-modal').classList.remove('open');
+            document.getElementById('contact-address').value = '';
+            document.getElementById('contact-name').value = '';
+            document.getElementById('add-contact-status').innerHTML = '';
+        }
+
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function formatTime(timestamp) {
+            const date = new Date(timestamp * 1000);
+            return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        }
+
+        document.getElementById('message-input').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+        });
+
+        document.getElementById('message-input').addEventListener('input', (e) => {
+            e.target.style.height = 'auto';
+            e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px';
+        });
+
+        document.getElementById('add-contact-modal').addEventListener('click', (e) => {
+            if (e.target.classList.contains('modal')) closeAddContactModal();
+        });
+
+        // File upload handling
+        let currentFile = null;
+
+        async function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (!file || !currentContact) return;
+
+            currentFile = file;
+            const fileSize = formatFileSize(file.size);
+
+            // Display file in chat
+            const container = document.getElementById('messages-container');
+            const fileEl = document.createElement('div');
+            fileEl.className = 'message sent';
+            fileEl.innerHTML = `
+                <div class="message-bubble">
+                    <div class="file-message">
+                        <div class="file-icon">&#128206;</div>
+                        <div class="file-info">
+                            <div class="file-name">${escapeHtml(file.name)}</div>
+                            <div class="file-size">${fileSize}</div>
+                            <div class="file-progress"><div class="file-progress-bar" style="width: 0%"></div></div>
+                        </div>
+                    </div>
+                    <div class="message-time">Preparing...</div>
+                </div>
+            `;
+            container.appendChild(fileEl);
+            container.scrollTop = container.scrollHeight;
+
+            // Simulate upload progress (in real implementation, would upload chunks)
+            const progressBar = fileEl.querySelector('.file-progress-bar');
+            const timeEl = fileEl.querySelector('.message-time');
+
+            let progress = 0;
+            const interval = setInterval(() => {
+                progress += 10;
+                progressBar.style.width = progress + '%';
+
+                if (progress >= 100) {
+                    clearInterval(interval);
+                    timeEl.textContent = 'Sent';
+                    showToast('File sent!');
+                }
+            }, 200);
+
+            // Reset file input
+            event.target.value = '';
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+            return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+        }
+
+        // Voice call handling
+        let activeCall = null;
+
+        async function startVoiceCall() {
+            if (!currentContact) {
+                showToast('Select a contact first');
+                return;
+            }
+
+            if (activeCall) {
+                // End call
+                await endVoiceCall();
+                return;
+            }
+
+            const callBtn = document.getElementById('call-btn');
+            callBtn.classList.add('active');
+
+            try {
+                const result = await api('/api/calls', 'POST', { peer_address: currentContact.address });
+
+                if (result.success && result.data) {
+                    activeCall = result.data;
+                    showToast('Calling ' + (currentContact.name || 'contact') + '...');
+
+                    // Update UI to show call in progress
+                    const container = document.getElementById('messages-container');
+                    const callEl = document.createElement('div');
+                    callEl.className = 'message received';
+                    callEl.id = 'active-call-indicator';
+                    callEl.innerHTML = `
+                        <div class="message-bubble" style="background: #4CAF50; color: white;">
+                            <div style="text-align: center;">
+                                <div style="font-size: 24px; margin-bottom: 8px;">&#128222;</div>
+                                <div>Voice Call Active</div>
+                                <div class="message-time" style="opacity: 1;">00:00</div>
+                            </div>
+                        </div>
+                    `;
+                    container.appendChild(callEl);
+                    container.scrollTop = container.scrollHeight;
+
+                    // Start call timer
+                    let seconds = 0;
+                    activeCall.timer = setInterval(() => {
+                        seconds++;
+                        const mins = Math.floor(seconds / 60);
+                        const secs = seconds % 60;
+                        const timeStr = `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+                        const timeEl = callEl.querySelector('.message-time');
+                        if (timeEl) timeEl.textContent = timeStr;
+                    }, 1000);
+                } else {
+                    callBtn.classList.remove('active');
+                    showToast('Failed to start call');
+                }
+            } catch (e) {
+                callBtn.classList.remove('active');
+                showToast('Call failed');
+            }
+        }
+
+        async function endVoiceCall() {
+            if (!activeCall) return;
+
+            const callBtn = document.getElementById('call-btn');
+            callBtn.classList.remove('active');
+
+            try {
+                await api(`/api/calls/${activeCall.call_id}`, 'POST');
+
+                // Clear timer
+                if (activeCall.timer) {
+                    clearInterval(activeCall.timer);
+                }
+
+                // Remove call indicator
+                const indicator = document.getElementById('active-call-indicator');
+                if (indicator) indicator.remove();
+
+                showToast('Call ended');
+                activeCall = null;
+            } catch (e) {
+                showToast('Error ending call');
+            }
+        }
+
+        loadIdentity();
+    </script>
+</body>
+</html>

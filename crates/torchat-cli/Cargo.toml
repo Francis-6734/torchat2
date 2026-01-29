@@ -1,0 +1,22 @@
+[package]
+name = "torchat-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Command-line interface for TorChat 2.0"
+
+[[bin]]
+name = "torchat"
+path = "src/main.rs"
+
+[dependencies]
+torchat-core = { workspace = true, features = ["voice"] }
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+shellexpand = "3"
+hex.workspace = true
+rpassword = "7"
+sha3 = "0.10"
