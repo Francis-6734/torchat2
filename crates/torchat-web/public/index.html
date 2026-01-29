@@ -1047,7 +1047,10 @@
 
         async function handleFileSelect(event) {
             const file = event.target.files[0];
-            if (!file || !currentContact) return;
+            if (!file || !currentContact) {
+                showToast('Select a contact first');
+                return;
+            }
 
             currentFile = file;
             const fileSize = formatFileSize(file.size);
@@ -1072,24 +1075,61 @@
             container.appendChild(fileEl);
             container.scrollTop = container.scrollHeight;
 
-            // Simulate upload progress (in real implementation, would upload chunks)
             const progressBar = fileEl.querySelector('.file-progress-bar');
             const timeEl = fileEl.querySelector('.message-time');
 
-            let progress = 0;
-            const interval = setInterval(() => {
-                progress += 10;
-                progressBar.style.width = progress + '%';
+            try {
+                // Read file as base64
+                timeEl.textContent = 'Reading file...';
+                progressBar.style.width = '10%';
 
-                if (progress >= 100) {
-                    clearInterval(interval);
+                const fileData = await readFileAsBase64(file);
+                progressBar.style.width = '30%';
+                timeEl.textContent = 'Sending...';
+
+                // Send file via API
+                const result = await api('/api/files/send', 'POST', {
+                    to: currentContact.address,
+                    filename: file.name,
+                    file_data: fileData
+                });
+
+                if (result.success) {
+                    progressBar.style.width = '100%';
                     timeEl.textContent = 'Sent';
-                    showToast('File sent!');
+                    showToast(`File "${file.name}" sent!`);
+                    console.log('File transfer started:', result.data);
+                } else {
+                    progressBar.style.width = '0%';
+                    progressBar.style.backgroundColor = '#ff4444';
+                    timeEl.textContent = 'Failed';
+                    showToast('Failed to send file: ' + (result.error || 'Unknown error'));
+                    console.error('File send error:', result.error);
                 }
-            }, 200);
+            } catch (error) {
+                progressBar.style.width = '0%';
+                progressBar.style.backgroundColor = '#ff4444';
+                timeEl.textContent = 'Error';
+                showToast('Error sending file: ' + error.message);
+                console.error('File send exception:', error);
+            }
 
             // Reset file input
             event.target.value = '';
+        }
+
+        // Helper to read file as base64
+        function readFileAsBase64(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => {
+                    // Remove data URL prefix (e.g., "data:image/png;base64,")
+                    const base64 = reader.result.split(',')[1];
+                    resolve(base64);
+                };
+                reader.onerror = () => reject(new Error('Failed to read file'));
+                reader.readAsDataURL(file);
+            });
         }
 
         function formatFileSize(bytes) {
