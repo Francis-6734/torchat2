@@ -17,11 +17,16 @@ mod file_transfer;
 mod message;
 mod relay;
 mod session;
+pub mod stream_transfer;
 
 pub use daemon::{DaemonCommand, DaemonEvent, MessagingDaemon};
 pub use file_transfer::{
     FileMetadata, FileTransferManager, IncomingTransfer, OutgoingTransfer, TransferEvent,
     TransferState, MAX_CHUNK_SIZE,
+};
+pub use stream_transfer::{
+    send_file_stream, receive_file_stream, is_file_transfer_magic,
+    StreamFileMetadata, TransferResult,
 };
 pub use message::{Message, MessageContent, MessageId, MessageStatus};
 pub use relay::{

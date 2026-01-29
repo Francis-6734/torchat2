@@ -767,7 +767,7 @@ pub struct FileTransferResponse {
     pub progress: f32,
 }
 
-/// Send a file to a contact
+/// Send a file to a contact using TCP stream over Tor
 pub async fn send_file(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
@@ -784,24 +784,21 @@ pub async fn send_file(
         }
     };
 
-    // Get daemon
+    // Verify daemon is running (for Tor config)
     let daemons = state.daemons.lock().await;
-    let daemon = match daemons.get(&user_id) {
-        Some(d) => d.clone(),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    error: Some("P2P daemon not running. Start daemon first.".to_string()),
-                }),
-            );
-        }
-    };
+    if !daemons.contains_key(&user_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some("P2P daemon not running. Start daemon first.".to_string()),
+            }),
+        );
+    }
     drop(daemons);
 
-    // Decode file data
+    // Decode file data from base64
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     let file_data = match BASE64.decode(&request.file_data) {
         Ok(data) => data,
@@ -819,7 +816,9 @@ pub async fn send_file(
 
     // Save to temp file
     let temp_dir = std::env::temp_dir();
-    let temp_path = temp_dir.join(format!("torchat_upload_{}", uuid::Uuid::new_v4()));
+    let temp_filename = format!("torchat_upload_{}", uuid::Uuid::new_v4());
+    let temp_path = temp_dir.join(&temp_filename);
+
     if let Err(e) = std::fs::write(&temp_path, &file_data) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -831,132 +830,73 @@ pub async fn send_file(
         );
     }
 
-    // Start file transfer
-    let file_transfer_mgr = daemon.file_transfer_manager();
-    match file_transfer_mgr.send_file(temp_path.clone(), request.to.clone()).await {
-        Ok((transfer_id, metadata)) => {
-            info!(
-                transfer_id = ?transfer_id,
-                to = %request.to,
-                filename = %metadata.filename,
-                size = metadata.size,
-                "File transfer initiated"
-            );
+    let file_size = file_data.len() as u64;
+    let filename = request.filename.clone();
+    let filename_for_response = filename.clone();
+    let to_address = request.to.clone();
+    let sender_address = identity.onion_address().to_string();
 
-            let transfer_id_hex = hex::encode(transfer_id);
-            let file_size = metadata.size;
-            let filename = metadata.filename.clone();
+    // Generate transfer ID for tracking
+    let transfer_id: [u8; 16] = torchat_core::crypto::random_bytes();
+    let transfer_id_hex = hex::encode(transfer_id);
 
-            // Calculate total chunks
-            const CHUNK_SIZE: u64 = 32 * 1024; // 32KB chunks
-            let total_chunks = ((file_size + CHUNK_SIZE - 1) / CHUNK_SIZE) as u32;
+    // Get Tor config
+    let tor_config = torchat_core::tor::TorConnectionConfig::default();
 
-            // Spawn task to send file offer then chunks
-            let to_address = request.to.clone();
-            let daemon_clone = daemon.clone();
-            let file_transfer_mgr_clone = daemon_clone.file_transfer_manager();
-            let cmd_sender = daemon_clone.command_sender();
-            let file_hash = metadata.hash;
-            let filename_for_offer = metadata.filename.clone();
+    // Spawn task to send file via TCP stream
+    let temp_path_clone = temp_path.clone();
+    tokio::spawn(async move {
+        info!(
+            to = %to_address,
+            filename = %filename,
+            size = file_size,
+            "Starting TCP stream file transfer"
+        );
 
-            tokio::spawn(async move {
-                // First send file offer with metadata
-                let offer_cmd = torchat_core::messaging::DaemonCommand::SendFileOffer {
-                    to: to_address.clone(),
-                    transfer_id,
-                    filename: filename_for_offer,
-                    size: file_size,
-                    hash: file_hash,
-                    total_chunks,
-                };
-
-                if let Err(e) = cmd_sender.send(offer_cmd).await {
-                    warn!(
-                        transfer_id = ?transfer_id,
-                        error = %e,
-                        "Failed to send file offer"
+        match torchat_core::messaging::send_file_stream(
+            temp_path_clone.clone(),
+            &to_address,
+            &sender_address,
+            &tor_config,
+        ).await {
+            Ok(result) => {
+                if result.success {
+                    info!(
+                        transfer_id = ?result.transfer_id,
+                        to = %to_address,
+                        "File transfer completed successfully"
                     );
-                    return;
+                } else {
+                    warn!(
+                        transfer_id = ?result.transfer_id,
+                        error = ?result.error,
+                        "File transfer failed"
+                    );
                 }
-
-                info!(transfer_id = ?transfer_id, "File offer sent, starting chunks...");
-
-                // Small delay after offer before sending chunks
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-                // Then send all chunks
-                for chunk_index in 0..total_chunks {
-                    // Get chunk data from file transfer manager
-                    match file_transfer_mgr_clone.get_chunk(&transfer_id, chunk_index).await {
-                        Ok(chunk_data) => {
-                            // Send chunk via daemon command
-                            let cmd = torchat_core::messaging::DaemonCommand::SendFileChunk {
-                                to: to_address.clone(),
-                                transfer_id,
-                                chunk_index,
-                                total_chunks,
-                                data: chunk_data,
-                            };
-
-                            if let Err(e) = cmd_sender.send(cmd).await {
-                                warn!(
-                                    transfer_id = ?transfer_id,
-                                    chunk = chunk_index,
-                                    error = %e,
-                                    "Failed to send file chunk command"
-                                );
-                                break;
-                            }
-
-                            debug!(
-                                transfer_id = ?transfer_id,
-                                chunk = chunk_index,
-                                total = total_chunks,
-                                "Sent file chunk"
-                            );
-                        }
-                        Err(e) => {
-                            warn!(
-                                transfer_id = ?transfer_id,
-                                chunk = chunk_index,
-                                error = %e,
-                                "Failed to get chunk data"
-                            );
-                            break;
-                        }
-                    }
-
-                    // Small delay between chunks to avoid overwhelming the connection
-                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                }
-
-                info!(transfer_id = ?transfer_id, "File transfer chunks sent");
-            });
-
-            (
-                StatusCode::OK,
-                Json(ApiResponse::ok(FileTransferResponse {
-                    transfer_id: transfer_id_hex,
-                    filename,
-                    size: file_size,
-                    status: "started".to_string(),
-                    progress: 0.0,
-                })),
-            )
+            }
+            Err(e) => {
+                warn!(
+                    to = %to_address,
+                    error = %e,
+                    "File transfer error"
+                );
+            }
         }
-        Err(e) => {
-            // Clean up temp file
-            let _ = std::fs::remove_file(&temp_path);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    error: Some(format!("Failed to initiate transfer: {}", e)),
-                }),
-            )
-        }
-    }
+
+        // Clean up temp file
+        let _ = std::fs::remove_file(&temp_path_clone);
+    });
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse::ok(FileTransferResponse {
+            transfer_id: transfer_id_hex,
+            filename: filename_for_response,
+            size: file_size,
+            status: "transferring".to_string(),
+            progress: 0.0,
+        })),
+    )
 }
 
 /// Get file transfer status

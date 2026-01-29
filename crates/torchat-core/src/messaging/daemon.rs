@@ -638,10 +638,101 @@ impl MessagingDaemon {
         database: Arc<TokioMutex<Database>>,
         user_id: i64,
     ) -> Result<()> {
+        use tokio::io::AsyncReadExt;
+
         debug!("Handling incoming connection");
 
-        // Read packet
-        let packet = Self::read_packet(&mut stream).await?;
+        // Peek at first 8 bytes to detect file transfer
+        let mut magic_buf = [0u8; 8];
+        stream.read_exact(&mut magic_buf).await
+            .map_err(|e| Error::Tor(format!("Failed to read magic: {}", e)))?;
+
+        // Check if this is a file transfer
+        if crate::messaging::stream_transfer::is_file_transfer_magic(&magic_buf) {
+            info!("Detected incoming file transfer stream");
+
+            // Get download directory
+            let download_dir = std::env::var("TORCHAT_DOWNLOAD_DIR")
+                .unwrap_or_else(|_| format!("{}/.torchat/downloads", std::env::var("HOME").unwrap_or_else(|_| ".".to_string())));
+
+            // Create directory if needed
+            let _ = tokio::fs::create_dir_all(&download_dir).await;
+
+            // Handle file transfer
+            match crate::messaging::stream_transfer::receive_file_stream(
+                &mut stream,
+                std::path::PathBuf::from(&download_dir),
+            ).await {
+                Ok(result) => {
+                    if result.success {
+                        info!(
+                            transfer_id = ?result.transfer_id,
+                            path = ?result.output_path,
+                            "File received successfully"
+                        );
+                        let _ = event_tx.send(DaemonEvent::FileTransferCompleted {
+                            transfer_id: result.transfer_id,
+                            output_path: result.output_path.map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+                        });
+                    } else {
+                        warn!(
+                            transfer_id = ?result.transfer_id,
+                            error = ?result.error,
+                            "File transfer failed"
+                        );
+                        let _ = event_tx.send(DaemonEvent::FileTransferFailed {
+                            transfer_id: result.transfer_id,
+                            error: result.error.unwrap_or_else(|| "Unknown error".to_string()),
+                        });
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "File transfer error");
+                }
+            }
+            return Ok(());
+        }
+
+        // Not a file transfer - reconstruct packet header and read rest
+        // The 8 bytes we read are: [version, type, length(4 bytes), payload_start(2 bytes)]
+        // Actually the header is 6 bytes: version(1) + type(1) + length(4)
+        // So we have header(6) + first 2 bytes of payload
+
+        // Read remaining header bytes (we have 8, header is 6, so we have 2 extra payload bytes)
+        let version = magic_buf[0];
+        let packet_type_byte = magic_buf[1];
+        let payload_len = u32::from_be_bytes([magic_buf[2], magic_buf[3], magic_buf[4], magic_buf[5]]) as usize;
+
+        // Validate
+        crate::protocol::validate_version(version)?;
+        let packet_type = PacketType::from_byte(packet_type_byte)?;
+
+        if payload_len > crate::protocol::MAX_PAYLOAD_SIZE {
+            return Err(Error::Protocol(format!("Payload too large: {}", payload_len)));
+        }
+
+        // We already have 2 bytes of payload (magic_buf[6], magic_buf[7])
+        let mut payload = vec![0u8; payload_len];
+        if payload_len >= 2 {
+            payload[0] = magic_buf[6];
+            payload[1] = magic_buf[7];
+            if payload_len > 2 {
+                stream.read_exact(&mut payload[2..]).await
+                    .map_err(|e| Error::Tor(format!("Failed to read payload: {}", e)))?;
+            }
+        } else if payload_len == 1 {
+            payload[0] = magic_buf[6];
+        }
+        // If payload_len == 0, nothing to do
+
+        let packet = Packet {
+            header: PacketHeader {
+                version,
+                packet_type,
+                length: payload_len as u32,
+            },
+            payload,
+        };
 
         match packet.header.packet_type {
             PacketType::Hello => {
