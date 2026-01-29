@@ -48,6 +48,8 @@ pub enum PacketType {
     CallSignal = 0x07,
     /// File transfer chunk.
     FileChunk = 0x08,
+    /// File transfer offer (metadata).
+    FileOffer = 0x09,
 }
 
 impl PacketType {
@@ -62,6 +64,7 @@ impl PacketType {
             0x06 => Ok(Self::Delete),
             0x07 => Ok(Self::CallSignal),
             0x08 => Ok(Self::FileChunk),
+            0x09 => Ok(Self::FileOffer),
             _ => Err(Error::Protocol(format!("unknown packet type: {:#04x}", byte))),
         }
     }
@@ -322,6 +325,39 @@ impl FileChunkPayload {
     }
 }
 
+/// FILE_OFFER packet payload.
+///
+/// Sent before file transfer to provide metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileOfferPayload {
+    /// Transfer ID (identifies the file transfer).
+    pub transfer_id: [u8; 16],
+    /// Original filename.
+    pub filename: String,
+    /// Total file size in bytes.
+    pub size: u64,
+    /// SHA-256 hash of file content.
+    pub hash: [u8; 32],
+    /// Total number of chunks.
+    pub total_chunks: u32,
+    /// Ratchet header.
+    pub header: RatchetHeader,
+    /// Encrypted metadata (for forward secrecy).
+    pub ciphertext: Vec<u8>,
+}
+
+impl FileOfferPayload {
+    /// Serialize to bytes.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        bincode::serialize(self).map_err(|e| Error::Encoding(e.to_string()))
+    }
+
+    /// Deserialize from bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        bincode::deserialize(bytes).map_err(|e| Error::Encoding(e.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,6 +373,7 @@ mod tests {
             PacketType::Delete,
             PacketType::CallSignal,
             PacketType::FileChunk,
+            PacketType::FileOffer,
         ] {
             let byte = pt.to_byte();
             let parsed = PacketType::from_byte(byte).expect("should parse");

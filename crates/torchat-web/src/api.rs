@@ -851,13 +851,40 @@ pub async fn send_file(
             const CHUNK_SIZE: u64 = 32 * 1024; // 32KB chunks
             let total_chunks = ((file_size + CHUNK_SIZE - 1) / CHUNK_SIZE) as u32;
 
-            // Spawn task to send chunks
+            // Spawn task to send file offer then chunks
             let to_address = request.to.clone();
             let daemon_clone = daemon.clone();
             let file_transfer_mgr_clone = daemon_clone.file_transfer_manager();
             let cmd_sender = daemon_clone.command_sender();
+            let file_hash = metadata.hash;
+            let filename_for_offer = metadata.filename.clone();
 
             tokio::spawn(async move {
+                // First send file offer with metadata
+                let offer_cmd = torchat_core::messaging::DaemonCommand::SendFileOffer {
+                    to: to_address.clone(),
+                    transfer_id,
+                    filename: filename_for_offer,
+                    size: file_size,
+                    hash: file_hash,
+                    total_chunks,
+                };
+
+                if let Err(e) = cmd_sender.send(offer_cmd).await {
+                    warn!(
+                        transfer_id = ?transfer_id,
+                        error = %e,
+                        "Failed to send file offer"
+                    );
+                    return;
+                }
+
+                info!(transfer_id = ?transfer_id, "File offer sent, starting chunks...");
+
+                // Small delay after offer before sending chunks
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+                // Then send all chunks
                 for chunk_index in 0..total_chunks {
                     // Get chunk data from file transfer manager
                     match file_transfer_mgr_clone.get_chunk(&transfer_id, chunk_index).await {

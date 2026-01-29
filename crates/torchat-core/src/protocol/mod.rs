@@ -27,7 +27,7 @@ mod types;
 pub use packet::{Packet, PacketHeader, HEADER_SIZE, MAX_PAYLOAD_SIZE};
 pub use types::{
     AckPayload, AckType, CallSignalPayload, CallSignalType, DeletePayload, FileChunkPayload,
-    HelloPayload, MessagePayload, PacketType, ReactionPayload, SessionInitPayload,
+    FileOfferPayload, HelloPayload, MessagePayload, PacketType, ReactionPayload, SessionInitPayload,
 };
 
 use crate::error::{Error, Result};

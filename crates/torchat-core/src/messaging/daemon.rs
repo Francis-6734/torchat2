@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 use crate::identity::{OnionAddress, TorIdentity};
 use crate::protocol::{
     AckPayload, AckType, CallSignalPayload, CallSignalType, FileChunkPayload,
-    MessagePayload, Packet, PacketHeader, PacketType
+    FileOfferPayload, MessagePayload, Packet, PacketHeader, PacketType
 };
 use crate::storage::Database;
 use crate::tor::{OnionService, OnionServiceConfig, TorConnection, TorConnectionConfig};
@@ -164,6 +164,23 @@ pub enum DaemonEvent {
         total_chunks: u32,
         /// Sender's address.
         from: String,
+        /// Decrypted chunk data.
+        data: Vec<u8>,
+    },
+    /// File offer received (incoming transfer request).
+    FileOfferReceived {
+        /// Transfer ID.
+        transfer_id: [u8; 16],
+        /// Filename.
+        filename: String,
+        /// File size in bytes.
+        size: u64,
+        /// SHA-256 hash.
+        hash: [u8; 32],
+        /// Total chunks.
+        total_chunks: u32,
+        /// Sender's address.
+        from: String,
     },
     /// File transfer started (incoming).
     FileTransferStarted {
@@ -234,7 +251,22 @@ pub enum DaemonCommand {
     },
     /// Stop the daemon.
     Stop,
-    /// Send a file to a peer.
+    /// Send file offer (metadata) to a peer.
+    SendFileOffer {
+        /// Recipient's onion address.
+        to: String,
+        /// Transfer ID.
+        transfer_id: [u8; 16],
+        /// Filename.
+        filename: String,
+        /// File size.
+        size: u64,
+        /// SHA-256 hash.
+        hash: [u8; 32],
+        /// Total chunks.
+        total_chunks: u32,
+    },
+    /// Send a file to a peer (legacy, not used).
     SendFile {
         /// Recipient's onion address.
         to: String,
@@ -689,6 +721,10 @@ impl MessagingDaemon {
                 // Handle call signal on direct connection
                 Self::handle_call_signal_packet(&packet, &sessions, &event_tx).await
             }
+            PacketType::FileOffer => {
+                // Handle file offer on direct connection
+                Self::handle_file_offer_packet(&packet, &sessions, &event_tx).await
+            }
             _ => {
                 warn!(packet_type = ?packet.header.packet_type, "Unhandled packet type");
                 Ok(())
@@ -795,6 +831,14 @@ impl MessagingDaemon {
                                 warn!(error = %e, "Failed to handle call signal");
                             }
                         }
+                        PacketType::FileOffer => {
+                            // Decrypt and process file offer
+                            if let Err(e) = Self::handle_file_offer_in_session(
+                                &packet, &peer_address, &sessions, &event_tx
+                            ).await {
+                                warn!(error = %e, "Failed to handle file offer");
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -880,6 +924,7 @@ impl MessagingDaemon {
                             transfer_id = ?payload.transfer_id,
                             chunk = payload.chunk_index,
                             total = payload.total_chunks,
+                            size = chunk_data.len(),
                             "File chunk received"
                         );
 
@@ -888,6 +933,7 @@ impl MessagingDaemon {
                             chunk_index: payload.chunk_index,
                             total_chunks: payload.total_chunks,
                             from: addr.clone(),
+                            data: chunk_data,
                         });
                         return Ok(());
                     }
@@ -926,6 +972,7 @@ impl MessagingDaemon {
                     chunk_index: payload.chunk_index,
                     total_chunks: payload.total_chunks,
                     from: peer_address.to_string(),
+                    data: chunk_data,
                 });
 
                 return Ok(());
@@ -997,6 +1044,83 @@ impl MessagingDaemon {
                     signal_type: payload.signal_type,
                     from: peer_address.to_string(),
                     data: signal_data,
+                });
+
+                return Ok(());
+            }
+        }
+
+        Err(Error::NoSession)
+    }
+
+    /// Handle a file offer packet on a direct connection.
+    async fn handle_file_offer_packet(
+        packet: &Packet,
+        sessions: &Arc<RwLock<HashMap<String, PeerSession>>>,
+        event_tx: &broadcast::Sender<DaemonEvent>,
+    ) -> Result<()> {
+        let payload = FileOfferPayload::from_bytes(&packet.payload)?;
+
+        // Try all established sessions to decrypt
+        let mut sessions_guard = sessions.write().await;
+        for (addr, session) in sessions_guard.iter_mut() {
+            if session.established {
+                if let Some(ratchet) = &mut session.ratchet {
+                    if let Ok(_decrypted) = ratchet.decrypt(&payload.header, &payload.ciphertext) {
+                        info!(
+                            from = %addr,
+                            transfer_id = ?payload.transfer_id,
+                            filename = %payload.filename,
+                            size = payload.size,
+                            "File offer received"
+                        );
+
+                        let _ = event_tx.send(DaemonEvent::FileOfferReceived {
+                            transfer_id: payload.transfer_id,
+                            filename: payload.filename.clone(),
+                            size: payload.size,
+                            hash: payload.hash,
+                            total_chunks: payload.total_chunks,
+                            from: addr.clone(),
+                        });
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        Err(Error::NoSession)
+    }
+
+    /// Handle a file offer within an established session.
+    async fn handle_file_offer_in_session(
+        packet: &Packet,
+        peer_address: &str,
+        sessions: &Arc<RwLock<HashMap<String, PeerSession>>>,
+        event_tx: &broadcast::Sender<DaemonEvent>,
+    ) -> Result<()> {
+        let payload = FileOfferPayload::from_bytes(&packet.payload)?;
+
+        let mut sessions_guard = sessions.write().await;
+        if let Some(session) = sessions_guard.get_mut(peer_address) {
+            if let Some(ratchet) = &mut session.ratchet {
+                let _decrypted = ratchet.decrypt(&payload.header, &payload.ciphertext)?;
+
+                info!(
+                    from = %peer_address,
+                    transfer_id = ?payload.transfer_id,
+                    filename = %payload.filename,
+                    size = payload.size,
+                    "File offer received and decrypted"
+                );
+
+                let _ = event_tx.send(DaemonEvent::FileOfferReceived {
+                    transfer_id: payload.transfer_id,
+                    filename: payload.filename,
+                    size: payload.size,
+                    hash: payload.hash,
+                    total_chunks: payload.total_chunks,
+                    from: peer_address.to_string(),
                 });
 
                 return Ok(());
@@ -1099,10 +1223,26 @@ impl MessagingDaemon {
                     *is_running = false;
                     break;
                 }
-                DaemonCommand::SendFile { to, file_path, transfer_id } => {
-                    info!(to = %to, file = ?file_path, "SendFile command received");
-                    // File transfer is handled via SendFileChunk commands
-                    // This command initiates the transfer
+                DaemonCommand::SendFileOffer { to, transfer_id, filename, size, hash, total_chunks } => {
+                    match Self::send_file_offer_to_peer(
+                        &to, transfer_id, &filename, size, hash, total_chunks,
+                        &sessions, &tor_config, &identity
+                    ).await {
+                        Ok(()) => {
+                            info!(to = %to, filename = %filename, size = size, "File offer sent");
+                        }
+                        Err(e) => {
+                            warn!(to = %to, error = %e, "Failed to send file offer");
+                            let _ = event_tx.send(DaemonEvent::FileTransferFailed {
+                                transfer_id,
+                                error: e.to_string(),
+                            });
+                        }
+                    }
+                }
+                DaemonCommand::SendFile { to, file_path, transfer_id: _ } => {
+                    info!(to = %to, file = ?file_path, "SendFile command received (legacy)");
+                    // File transfer is now handled via SendFileOffer + SendFileChunk commands
                 }
                 DaemonCommand::SendFileChunk { to, transfer_id, chunk_index, total_chunks, data } => {
                     match Self::send_file_chunk_to_peer(
@@ -1351,6 +1491,105 @@ impl MessagingDaemon {
         let mut conn = TorConnection::connect(tor_config, &peer_addr).await?;
         let packet = Packet::new(PacketType::Ack, ack.to_bytes()?)?;
         Self::write_packet(conn.stream_mut(), &packet).await?;
+
+        Ok(())
+    }
+
+    /// Send a file offer (metadata) to a peer.
+    async fn send_file_offer_to_peer(
+        address: &str,
+        transfer_id: [u8; 16],
+        filename: &str,
+        size: u64,
+        hash: [u8; 32],
+        total_chunks: u32,
+        sessions: &Arc<RwLock<HashMap<String, PeerSession>>>,
+        tor_config: &TorConnectionConfig,
+        identity: &TorIdentity,
+    ) -> Result<()> {
+        let peer_addr = OnionAddress::from_string(address)
+            .map_err(|_| Error::Protocol("Invalid address".into()))?;
+
+        // Open connection to peer
+        let mut conn = TorConnection::connect(tor_config, &peer_addr).await?;
+
+        // Check if we need to establish a session
+        let need_handshake = {
+            let sessions = sessions.read().await;
+            match sessions.get(address) {
+                Some(s) => !s.established,
+                None => true,
+            }
+        };
+
+        // Perform handshake if needed
+        if need_handshake {
+            info!(address = %address, "Performing handshake for file offer...");
+
+            let our_ephemeral = EphemeralKeypair::generate();
+            let our_public = *our_ephemeral.public_key().as_bytes();
+
+            let hello = ChatHello {
+                sender_address: identity.onion_address().to_string(),
+                ephemeral_public: our_public,
+                identity_public: *identity.public_key().as_bytes(),
+                timestamp: chrono::Utc::now().timestamp(),
+            };
+
+            let packet = Packet::new(PacketType::Hello, hello.to_bytes()?)?;
+            Self::write_packet(conn.stream_mut(), &packet).await?;
+
+            let response = Self::read_packet(conn.stream_mut()).await?;
+
+            if response.header.packet_type != PacketType::SessionInit {
+                return Err(Error::Protocol("Expected SessionInit response".into()));
+            }
+
+            let init = ChatHelloResponse::from_bytes(&response.payload)?;
+            let their_public = X25519PublicKey::from(init.ephemeral_public);
+            let shared = our_ephemeral.diffie_hellman(&their_public);
+            let ratchet = DoubleRatchet::init_initiator_from_bytes(shared.as_bytes(), &their_public)?;
+
+            let mut sessions_guard = sessions.write().await;
+            let session = sessions_guard
+                .entry(address.to_string())
+                .or_insert_with(|| PeerSession::new(peer_addr.clone()));
+
+            session.ratchet = Some(ratchet);
+            session.shared_secret = Some(*shared.as_bytes());
+            session.our_ephemeral = Some(our_ephemeral);
+            session.established = true;
+
+            info!(address = %address, "Handshake complete for file offer");
+        }
+
+        // Encrypt metadata and send file offer
+        let encrypted_payload = {
+            let mut sessions_guard = sessions.write().await;
+            let session = sessions_guard
+                .get_mut(address)
+                .ok_or_else(|| Error::NoSession)?;
+
+            let ratchet = session.ratchet.as_mut().ok_or_else(|| Error::NoSession)?;
+
+            // Encrypt a simple marker (metadata is in the packet itself)
+            let (header, ciphertext) = ratchet.encrypt(b"file_offer")?;
+
+            FileOfferPayload {
+                transfer_id,
+                filename: filename.to_string(),
+                size,
+                hash,
+                total_chunks,
+                header,
+                ciphertext,
+            }
+        };
+
+        let packet = Packet::new(PacketType::FileOffer, encrypted_payload.to_bytes()?)?;
+        Self::write_packet(conn.stream_mut(), &packet).await?;
+
+        info!(to = %address, filename = %filename, size = size, "File offer sent");
 
         Ok(())
     }
