@@ -4,9 +4,11 @@
 //! Sessions are tracked via cookies.
 
 use axum::{
+    body::Body,
     extract::{Path, State},
-    http::{header::SET_COOKIE, HeaderMap, StatusCode},
+    http::{header, header::SET_COOKIE, HeaderMap, StatusCode},
     Json,
+    response::{IntoResponse, Response},
 };
 use serde::Serialize;
 use std::sync::Arc;
@@ -1087,6 +1089,126 @@ pub async fn list_received_files(
         .collect();
 
     (StatusCode::OK, Json(ApiResponse::ok(filtered)))
+}
+
+/// Download a received file by transfer ID
+pub async fn download_file(
+    headers: HeaderMap,
+    Path(transfer_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    // Authenticate user
+    let user_id = match get_current_user(&headers, &state).await {
+        Ok((id, _, _)) => id,
+        Err(_) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                "Not authenticated",
+            ).into_response();
+        }
+    };
+
+    // Find the file in user's received files
+    let received_files = state.received_files.lock().await;
+    let user_files = received_files.get(&user_id);
+
+    let file_info = user_files.and_then(|files| {
+        files.iter().find(|f| f.transfer_id == transfer_id)
+    });
+
+    let file_info = match file_info {
+        Some(f) => f.clone(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                "File not found",
+            ).into_response();
+        }
+    };
+    drop(received_files);
+
+    // Read the file
+    let file_path = std::path::Path::new(&file_info.output_path);
+    if !file_path.exists() {
+        return (
+            StatusCode::NOT_FOUND,
+            "File no longer exists on disk",
+        ).into_response();
+    }
+
+    let file_content = match tokio::fs::read(&file_path).await {
+        Ok(content) => content,
+        Err(e) => {
+            warn!(error = %e, path = %file_info.output_path, "Failed to read file");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to read file",
+            ).into_response();
+        }
+    };
+
+    // Determine content type based on file extension
+    let content_type = get_content_type(&file_info.filename);
+
+    // Build response with proper headers for download
+    let filename_encoded = urlencoding::encode(&file_info.filename);
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"; filename*=UTF-8''{}",
+                file_info.filename, filename_encoded)
+        )
+        .header(header::CONTENT_LENGTH, file_content.len())
+        .body(Body::from(file_content))
+        .unwrap()
+}
+
+/// Get content type from filename extension
+fn get_content_type(filename: &str) -> &'static str {
+    let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        // Images
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "ico" => "image/x-icon",
+        // Videos
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "avi" => "video/x-msvideo",
+        "mov" => "video/quicktime",
+        "mkv" => "video/x-matroska",
+        // Audio
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "flac" => "audio/flac",
+        "m4a" => "audio/mp4",
+        // Documents
+        "pdf" => "application/pdf",
+        "doc" | "docx" => "application/msword",
+        "xls" | "xlsx" => "application/vnd.ms-excel",
+        "ppt" | "pptx" => "application/vnd.ms-powerpoint",
+        "txt" => "text/plain",
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "js" => "application/javascript",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        // Archives
+        "zip" => "application/zip",
+        "tar" => "application/x-tar",
+        "gz" | "gzip" => "application/gzip",
+        "rar" => "application/vnd.rar",
+        "7z" => "application/x-7z-compressed",
+        // Default
+        _ => "application/octet-stream",
+    }
 }
 
 /// Add a received file to the list (called internally when file is received)

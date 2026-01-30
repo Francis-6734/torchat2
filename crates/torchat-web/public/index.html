@@ -381,15 +381,32 @@
             padding: 4px;
         }
 
+        .file-message.clickable {
+            cursor: pointer;
+            transition: transform 0.1s, opacity 0.1s;
+        }
+
+        .file-message.clickable:hover {
+            opacity: 0.9;
+        }
+
+        .file-message.clickable:active {
+            transform: scale(0.98);
+        }
+
         .file-icon {
             width: 40px;
             height: 40px;
-            background: rgba(255,255,255,0.2);
+            background: rgba(102, 126, 234, 0.15);
             border-radius: 8px;
             display: flex;
             align-items: center;
             justify-content: center;
             font-size: 20px;
+        }
+
+        .message.received .file-icon {
+            background: rgba(102, 126, 234, 0.15);
         }
 
         .file-info {
@@ -404,6 +421,40 @@
         .file-size {
             font-size: 11px;
             opacity: 0.8;
+        }
+
+        .file-actions {
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+        }
+
+        .file-action-btn {
+            padding: 6px 12px;
+            border: none;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .file-action-btn.download {
+            background: #667eea;
+            color: white;
+        }
+
+        .file-action-btn.download:hover {
+            background: #5a6fd6;
+        }
+
+        .file-action-btn.open {
+            background: #e8e8e8;
+            color: #333;
+        }
+
+        .file-action-btn.open:hover {
+            background: #ddd;
         }
 
         .file-progress {
@@ -928,15 +979,20 @@
 
                     container.innerHTML = allItems.map(item => {
                         if (item.is_file) {
+                            const fileIcon = getFileIcon(item.filename);
                             return `
                                 <div class="message received">
                                     <div class="message-bubble">
-                                        <div class="file-message">
-                                            <div class="file-icon">&#128206;</div>
+                                        <div class="file-message clickable" onclick="openFilePreview('${escapeHtml(item.id)}', '${escapeHtml(item.filename)}')">
+                                            <div class="file-icon">${fileIcon}</div>
                                             <div class="file-info">
                                                 <div class="file-name">${escapeHtml(item.filename)}</div>
                                                 <div class="file-size">${formatFileSize(item.size)}</div>
                                             </div>
+                                        </div>
+                                        <div class="file-actions">
+                                            <button class="file-action-btn download" onclick="downloadFile('${escapeHtml(item.id)}', '${escapeHtml(item.filename)}')">Download</button>
+                                            <button class="file-action-btn open" onclick="openFileInBrowser('${escapeHtml(item.id)}', '${escapeHtml(item.filename)}')">Open</button>
                                         </div>
                                         <div class="message-time">${formatTime(item.timestamp)}</div>
                                     </div>
@@ -1188,6 +1244,64 @@
             if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
             if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
             return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+        }
+
+        // Get appropriate icon for file type
+        function getFileIcon(filename) {
+            const ext = filename.split('.').pop().toLowerCase();
+            const icons = {
+                // Images
+                'jpg': '🖼️', 'jpeg': '🖼️', 'png': '🖼️', 'gif': '🖼️', 'webp': '🖼️', 'svg': '🖼️',
+                // Videos
+                'mp4': '🎬', 'webm': '🎬', 'avi': '🎬', 'mov': '🎬', 'mkv': '🎬',
+                // Audio
+                'mp3': '🎵', 'wav': '🎵', 'ogg': '🎵', 'flac': '🎵', 'm4a': '🎵',
+                // Documents
+                'pdf': '📄', 'doc': '📝', 'docx': '📝', 'txt': '📝',
+                'xls': '📊', 'xlsx': '📊', 'csv': '📊',
+                'ppt': '📊', 'pptx': '📊',
+                // Archives
+                'zip': '📦', 'rar': '📦', 'tar': '📦', 'gz': '📦', '7z': '📦',
+                // Code
+                'js': '💻', 'py': '💻', 'rs': '💻', 'html': '💻', 'css': '💻', 'json': '💻',
+            };
+            return icons[ext] || '📎';
+        }
+
+        // Download a received file
+        function downloadFile(transferId, filename) {
+            event.stopPropagation();
+            const url = `/api/files/download/${encodeURIComponent(transferId)}`;
+
+            // Create a temporary link and click it to trigger download
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = filename;
+            link.style.display = 'none';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+
+            showToast(`Downloading ${filename}...`);
+        }
+
+        // Open file in browser (new tab)
+        function openFileInBrowser(transferId, filename) {
+            event.stopPropagation();
+            const url = `/api/files/download/${encodeURIComponent(transferId)}`;
+            window.open(url, '_blank');
+        }
+
+        // Preview file (same as open in browser for now)
+        function openFilePreview(transferId, filename) {
+            const ext = filename.split('.').pop().toLowerCase();
+            const previewable = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'pdf', 'txt', 'mp4', 'webm', 'mp3', 'wav', 'ogg'];
+
+            if (previewable.includes(ext)) {
+                openFileInBrowser(transferId, filename);
+            } else {
+                downloadFile(transferId, filename);
+            }
         }
 
         // Voice call handling

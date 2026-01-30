@@ -227,6 +227,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/files/status/:transfer_id", get(api::file_transfer_status))
         .route("/api/files/outgoing", get(api::list_outgoing_transfers))
         .route("/api/files/received/:contact_address", get(api::list_received_files))
+        .route("/api/files/download/:transfer_id", get(api::download_file))
         // Voice calls
         .route("/api/calls/start", post(api::start_call))
         .route("/api/calls/answer", post(api::answer_call))
