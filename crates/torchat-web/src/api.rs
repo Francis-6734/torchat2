@@ -280,7 +280,7 @@ async fn get_current_user(
 
 /// Ensure the messaging daemon is running for a user, starting it if needed
 async fn ensure_daemon_running(
-    state: &AppState,
+    state: &Arc<AppState>,
     user_id: i64,
     identity: &TorIdentity,
 ) -> Result<(), String> {
@@ -309,6 +309,42 @@ async fn ensure_daemon_running(
 
     daemon.start(service_config).await
         .map_err(|e| format!("Failed to start daemon: {}", e))?;
+
+    // Subscribe to daemon events for file transfer notifications
+    // This is critical - without this, received files won't be tracked!
+    let mut event_rx = daemon.subscribe();
+    let state_clone = state.clone();
+    let user_id_clone = user_id;
+
+    tokio::spawn(async move {
+        use torchat_core::messaging::DaemonEvent;
+        while let Ok(event) = event_rx.recv().await {
+            match event {
+                DaemonEvent::FileTransferCompleted { transfer_id, output_path, filename, from, size } => {
+                    info!(
+                        user_id = user_id_clone,
+                        filename = %filename,
+                        from = %from,
+                        "File received (auto-start daemon), adding to list"
+                    );
+                    add_received_file(
+                        &state_clone,
+                        user_id_clone,
+                        hex::encode(transfer_id),
+                        filename,
+                        size,
+                        from,
+                        output_path,
+                    ).await;
+                }
+                DaemonEvent::Stopped => {
+                    info!(user_id = user_id_clone, "Auto-start daemon event listener stopped");
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
 
     // Store daemon
     let mut daemons = state.daemons.lock().await;
@@ -621,6 +657,41 @@ pub async fn start_daemon(
 
     match daemon.start(service_config).await {
         Ok(()) => {
+            // Subscribe to daemon events for file transfer notifications
+            let mut event_rx = daemon.subscribe();
+            let state_clone = state.clone();
+            let user_id_clone = user_id;
+
+            tokio::spawn(async move {
+                use torchat_core::messaging::DaemonEvent;
+                while let Ok(event) = event_rx.recv().await {
+                    match event {
+                        DaemonEvent::FileTransferCompleted { transfer_id, output_path, filename, from, size } => {
+                            info!(
+                                user_id = user_id_clone,
+                                filename = %filename,
+                                from = %from,
+                                "File received, adding to list"
+                            );
+                            add_received_file(
+                                &state_clone,
+                                user_id_clone,
+                                hex::encode(transfer_id),
+                                filename,
+                                size,
+                                from,
+                                output_path,
+                            ).await;
+                        }
+                        DaemonEvent::Stopped => {
+                            info!(user_id = user_id_clone, "Daemon event listener stopped");
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            });
+
             // Store daemon
             let mut daemons = state.daemons.lock().await;
             daemons.insert(user_id, daemon);
@@ -989,6 +1060,58 @@ pub async fn file_transfer_status(
             )
         }
     }
+}
+
+/// List received files for a specific contact
+pub async fn list_received_files(
+    headers: HeaderMap,
+    Path(contact_address): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<ApiResponse<Vec<crate::models::ReceivedFile>>>) {
+    let (user_id, _, _) = match get_current_user(&headers, &state).await {
+        Ok(user) => user,
+        Err((status, json)) => {
+            return (status, Json(ApiResponse {
+                success: false,
+                data: None,
+                error: json.0.error,
+            }));
+        }
+    };
+
+    let received_files = state.received_files.lock().await;
+    let user_files = received_files.get(&user_id).cloned().unwrap_or_default();
+
+    // Filter by contact address
+    let filtered: Vec<_> = user_files
+        .into_iter()
+        .filter(|f| f.from == contact_address)
+        .collect();
+
+    (StatusCode::OK, Json(ApiResponse::ok(filtered)))
+}
+
+/// Add a received file to the list (called internally when file is received)
+pub async fn add_received_file(
+    state: &Arc<AppState>,
+    user_id: i64,
+    transfer_id: String,
+    filename: String,
+    size: u64,
+    from: String,
+    output_path: String,
+) {
+    let mut received_files = state.received_files.lock().await;
+    let user_files = received_files.entry(user_id).or_insert_with(Vec::new);
+
+    user_files.push(crate::models::ReceivedFile {
+        transfer_id,
+        filename,
+        size,
+        from,
+        output_path,
+        timestamp: chrono::Utc::now().timestamp(),
+    });
 }
 
 // ==================== Voice Call API ====================

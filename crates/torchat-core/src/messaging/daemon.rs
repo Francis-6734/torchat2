@@ -197,6 +197,12 @@ pub enum DaemonEvent {
         transfer_id: [u8; 16],
         /// Output file path.
         output_path: String,
+        /// Original filename.
+        filename: String,
+        /// Sender's address.
+        from: String,
+        /// File size in bytes.
+        size: u64,
     },
     /// File transfer failed.
     FileTransferFailed {
@@ -431,6 +437,15 @@ impl MessagingDaemon {
 
         info!(address = %onion_addr, "Onion service started");
 
+        // Ensure download directory exists for receiving files
+        let download_dir = std::env::var("TORCHAT_DOWNLOAD_DIR")
+            .unwrap_or_else(|_| format!("{}/.torchat/downloads", std::env::var("HOME").unwrap_or_else(|_| ".".to_string())));
+        if let Err(e) = tokio::fs::create_dir_all(&download_dir).await {
+            warn!(path = %download_dir, error = %e, "Failed to create download directory");
+        } else {
+            info!(path = %download_dir, "Download directory ready");
+        }
+
         // Mark as running
         {
             let mut running = self.running.write().await;
@@ -655,8 +670,12 @@ impl MessagingDaemon {
             let download_dir = std::env::var("TORCHAT_DOWNLOAD_DIR")
                 .unwrap_or_else(|_| format!("{}/.torchat/downloads", std::env::var("HOME").unwrap_or_else(|_| ".".to_string())));
 
-            // Create directory if needed
-            let _ = tokio::fs::create_dir_all(&download_dir).await;
+            // Create directory if needed - log errors instead of ignoring
+            if let Err(e) = tokio::fs::create_dir_all(&download_dir).await {
+                warn!(path = %download_dir, error = %e, "Failed to create download directory");
+            } else {
+                info!(path = %download_dir, "Download directory ready");
+            }
 
             // Handle file transfer
             match crate::messaging::stream_transfer::receive_file_stream(
@@ -668,11 +687,16 @@ impl MessagingDaemon {
                         info!(
                             transfer_id = ?result.transfer_id,
                             path = ?result.output_path,
+                            filename = ?result.filename,
+                            from = ?result.sender_address,
                             "File received successfully"
                         );
                         let _ = event_tx.send(DaemonEvent::FileTransferCompleted {
                             transfer_id: result.transfer_id,
                             output_path: result.output_path.map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+                            filename: result.filename.unwrap_or_default(),
+                            from: result.sender_address.unwrap_or_default(),
+                            size: result.size.unwrap_or(0),
                         });
                     } else {
                         warn!(

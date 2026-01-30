@@ -895,22 +895,73 @@
             if (!isPolling) {
                 container.innerHTML = '<div class="loading"><div class="spinner"></div><p>Loading...</p></div>';
             }
-            const result = await api(`/api/messages/${encodeURIComponent(address)}`);
-            if (result.success && result.data && result.data.length > 0) {
-                // Only update if new messages arrived (or initial load)
-                if (!isPolling || result.data.length !== lastMessageCount) {
-                    lastMessageCount = result.data.length;
-                    container.innerHTML = result.data.map(msg => `
-                        <div class="message ${msg.is_outgoing ? 'sent' : 'received'}">
-                            <div class="message-bubble">${escapeHtml(msg.content)}<div class="message-time">${formatTime(msg.timestamp)}</div></div>
-                        </div>
-                    `).join('');
+
+            // Fetch both messages and received files
+            const [msgResult, filesResult] = await Promise.all([
+                api(`/api/messages/${encodeURIComponent(address)}`),
+                api(`/api/files/received/${encodeURIComponent(address)}`)
+            ]);
+
+            const messages = (msgResult.success && msgResult.data) ? msgResult.data : [];
+            const receivedFiles = (filesResult.success && filesResult.data) ? filesResult.data : [];
+
+            // Convert received files to message-like format
+            const fileMessages = receivedFiles.map(f => ({
+                id: f.transfer_id,
+                content: `[File] ${f.filename}`,
+                timestamp: f.timestamp,
+                is_outgoing: false,
+                is_file: true,
+                filename: f.filename,
+                size: f.size,
+                output_path: f.output_path
+            }));
+
+            // Merge and sort by timestamp
+            const allItems = [...messages, ...fileMessages].sort((a, b) => a.timestamp - b.timestamp);
+
+            if (allItems.length > 0) {
+                // Only update if new items arrived (or initial load)
+                if (!isPolling || allItems.length !== lastMessageCount) {
+                    const previousCount = lastMessageCount;
+                    lastMessageCount = allItems.length;
+
+                    container.innerHTML = allItems.map(item => {
+                        if (item.is_file) {
+                            return `
+                                <div class="message received">
+                                    <div class="message-bubble">
+                                        <div class="file-message">
+                                            <div class="file-icon">&#128206;</div>
+                                            <div class="file-info">
+                                                <div class="file-name">${escapeHtml(item.filename)}</div>
+                                                <div class="file-size">${formatFileSize(item.size)}</div>
+                                            </div>
+                                        </div>
+                                        <div class="message-time">${formatTime(item.timestamp)}</div>
+                                    </div>
+                                </div>
+                            `;
+                        } else {
+                            return `
+                                <div class="message ${item.is_outgoing ? 'sent' : 'received'}">
+                                    <div class="message-bubble">${escapeHtml(item.content)}<div class="message-time">${formatTime(item.timestamp)}</div></div>
+                                </div>
+                            `;
+                        }
+                    }).join('');
+
                     container.scrollTop = container.scrollHeight;
-                    // Show notification for new incoming messages
-                    if (isPolling && result.data.length > lastMessageCount) {
-                        const newMsg = result.data[result.data.length - 1];
-                        if (!newMsg.is_outgoing) {
-                            showToast('New message received!');
+
+                    // Show notification for new incoming items
+                    if (isPolling && allItems.length > previousCount) {
+                        const newItem = allItems[allItems.length - 1];
+                        if (!newItem.is_outgoing) {
+                            if (newItem.is_file) {
+                                showToast(`File received: ${newItem.filename}`);
+                            } else {
+                                showToast('New message received!');
+                            }
                         }
                     }
                 }

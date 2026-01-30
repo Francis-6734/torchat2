@@ -36,6 +36,7 @@ fn test_call_state_transitions() {
 }
 
 /// Test call decline flow.
+#[cfg(feature = "voice")]
 #[test]
 fn test_call_decline() {
     let mut caller = VoiceCall::new_outgoing("callee.onion".to_string());
@@ -49,6 +50,7 @@ fn test_call_decline() {
 }
 
 /// Test hangup during call.
+#[cfg(feature = "voice")]
 #[test]
 fn test_call_hangup() {
     let mut caller = VoiceCall::new_outgoing("callee.onion".to_string());
@@ -72,6 +74,7 @@ fn test_call_hangup() {
 }
 
 /// Test audio encryption and decryption.
+#[cfg(feature = "voice")]
 #[test]
 fn test_audio_encryption() {
     let mut caller = VoiceCall::new_outgoing("callee.onion".to_string());
@@ -102,6 +105,7 @@ fn test_audio_encryption() {
 }
 
 /// Test jitter buffer.
+#[cfg(feature = "voice")]
 #[test]
 fn test_jitter_buffer() {
     let mut caller = VoiceCall::new_outgoing("callee.onion".to_string());
@@ -138,6 +142,7 @@ fn test_jitter_buffer() {
 }
 
 /// Test audio capabilities negotiation.
+#[cfg(feature = "voice")]
 #[test]
 fn test_audio_capabilities() {
     let caps = AudioCapabilities::default();
@@ -150,6 +155,7 @@ fn test_audio_capabilities() {
 }
 
 /// Test call statistics.
+#[cfg(feature = "voice")]
 #[test]
 fn test_call_statistics() {
     let mut caller = VoiceCall::new_outgoing("callee.onion".to_string());
@@ -175,6 +181,7 @@ fn test_call_statistics() {
 }
 
 /// Test multiple audio frames with packet loss simulation.
+#[cfg(feature = "voice")]
 #[test]
 fn test_packet_loss_tracking() {
     let mut caller = VoiceCall::new_outgoing("callee.onion".to_string());
@@ -203,6 +210,7 @@ fn test_packet_loss_tracking() {
 }
 
 /// Test call manager.
+#[cfg(feature = "voice")]
 #[test]
 fn test_call_manager() {
     let mut manager = VoiceCallManager::new();
@@ -225,6 +233,7 @@ fn test_call_manager() {
 }
 
 /// Test audio constants.
+#[cfg(feature = "voice")]
 #[test]
 fn test_audio_constants() {
     // Verify audio parameters are sensible
@@ -234,6 +243,7 @@ fn test_audio_constants() {
 }
 
 /// Test cannot encrypt before call is connected.
+#[cfg(feature = "voice")]
 #[test]
 fn test_encrypt_requires_connection() {
     let mut caller = VoiceCall::new_outgoing("callee.onion".to_string());
@@ -251,6 +261,7 @@ fn test_encrypt_requires_connection() {
 }
 
 /// Test cannot initiate call twice.
+#[cfg(feature = "voice")]
 #[test]
 fn test_double_initiate_fails() {
     let mut caller = VoiceCall::new_outgoing("callee.onion".to_string());
@@ -263,6 +274,7 @@ fn test_double_initiate_fails() {
 }
 
 /// Test cannot accept when not ringing.
+#[cfg(feature = "voice")]
 #[test]
 fn test_accept_requires_ringing() {
     let mut callee = VoiceCall::new_incoming([0u8; 16], "caller.onion".to_string());

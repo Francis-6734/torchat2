@@ -45,6 +45,12 @@ pub struct TransferResult {
     pub output_path: Option<PathBuf>,
     /// Error message if failed.
     pub error: Option<String>,
+    /// Original filename.
+    pub filename: Option<String>,
+    /// Sender's address.
+    pub sender_address: Option<String>,
+    /// File size in bytes.
+    pub size: Option<u64>,
 }
 
 /// Send a file to a peer via TCP stream over Tor.
@@ -168,6 +174,9 @@ pub async fn send_file_stream(
                     success: true,
                     output_path: None,
                     error: None,
+                    filename: None,
+                    sender_address: None,
+                    size: None,
                 })
             } else {
                 warn!(transfer_id = ?transfer_id, "Received failure acknowledgment");
@@ -176,6 +185,9 @@ pub async fn send_file_stream(
                     success: false,
                     output_path: None,
                     error: Some("Receiver reported failure".into()),
+                    filename: None,
+                    sender_address: None,
+                    size: None,
                 })
             }
         }
@@ -186,6 +198,9 @@ pub async fn send_file_stream(
                 success: true, // Assume success if we sent all data
                 output_path: None,
                 error: Some(format!("No acknowledgment: {}", e)),
+                filename: None,
+                sender_address: None,
+                size: None,
             })
         }
         Err(_) => {
@@ -195,6 +210,9 @@ pub async fn send_file_stream(
                 success: true, // Assume success if we sent all data
                 output_path: None,
                 error: Some("Acknowledgment timeout".into()),
+                filename: None,
+                sender_address: None,
+                size: None,
             })
         }
     }
@@ -300,6 +318,9 @@ pub async fn receive_file_stream(
             success: true,
             output_path: Some(output_path),
             error: None,
+            filename: Some(metadata.filename),
+            sender_address: Some(metadata.sender_address),
+            size: Some(metadata.size),
         })
     } else {
         warn!(
@@ -321,6 +342,9 @@ pub async fn receive_file_stream(
             success: false,
             output_path: None,
             error: Some("Hash verification failed".into()),
+            filename: Some(metadata.filename),
+            sender_address: Some(metadata.sender_address),
+            size: Some(metadata.size),
         })
     }
 }

@@ -7,6 +7,17 @@ use tokio::sync::Mutex as TokioMutex;
 use torchat_core::messaging::{FileTransferManager, MessagingDaemon};
 use torchat_core::storage::Database;
 
+/// Received file info
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceivedFile {
+    pub transfer_id: String,
+    pub filename: String,
+    pub size: u64,
+    pub from: String,
+    pub output_path: String,
+    pub timestamp: i64,
+}
+
 /// Application shared state (multi-user P2P server)
 pub struct AppState {
     /// Database for storing all users and their data
@@ -18,6 +29,8 @@ pub struct AppState {
     /// File transfer manager for handling file exchanges
     #[allow(dead_code)]
     pub file_manager: Arc<FileTransferManager>,
+    /// Received files per user (user_id -> list of received files)
+    pub received_files: Arc<TokioMutex<HashMap<i64, Vec<ReceivedFile>>>>,
 }
 
 /// User identity with session info

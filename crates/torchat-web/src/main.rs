@@ -185,6 +185,7 @@ async fn main() -> anyhow::Result<()> {
         data_dir: data_dir.clone(),
         daemons: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         file_manager: Arc::new(torchat_core::messaging::FileTransferManager::new()),
+        received_files: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     });
 
     info!("Data directory: {}", data_dir);
@@ -223,6 +224,7 @@ async fn main() -> anyhow::Result<()> {
         // File transfer
         .route("/api/files/send", post(api::send_file))
         .route("/api/files/status/:transfer_id", get(api::file_transfer_status))
+        .route("/api/files/received/:contact_address", get(api::list_received_files))
         // Voice calls
         .route("/api/calls/start", post(api::start_call))
         .route("/api/calls/answer", post(api::answer_call))
