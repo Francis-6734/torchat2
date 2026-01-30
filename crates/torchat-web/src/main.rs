@@ -186,6 +186,7 @@ async fn main() -> anyhow::Result<()> {
         daemons: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         file_manager: Arc::new(torchat_core::messaging::FileTransferManager::new()),
         received_files: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        outgoing_transfers: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     });
 
     info!("Data directory: {}", data_dir);
@@ -224,6 +225,7 @@ async fn main() -> anyhow::Result<()> {
         // File transfer
         .route("/api/files/send", post(api::send_file))
         .route("/api/files/status/:transfer_id", get(api::file_transfer_status))
+        .route("/api/files/outgoing", get(api::list_outgoing_transfers))
         .route("/api/files/received/:contact_address", get(api::list_received_files))
         // Voice calls
         .route("/api/calls/start", post(api::start_call))
@@ -231,6 +233,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/calls/hangup", post(api::hangup_call))
         // Admin - list all users
         .route("/api/users", get(api::list_users))
+        // Diagnostic - test connectivity
+        .route("/api/diagnostic/connectivity", post(api::test_connectivity))
 
         // Apply security middleware
         .layer(middleware::from_fn(security_headers_middleware))

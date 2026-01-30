@@ -18,6 +18,18 @@ pub struct ReceivedFile {
     pub timestamp: i64,
 }
 
+/// Outgoing transfer status
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutgoingTransferStatus {
+    pub transfer_id: String,
+    pub filename: String,
+    pub to: String,
+    pub size: u64,
+    pub status: String,  // "pending", "connecting", "transferring", "completed", "failed"
+    pub error: Option<String>,
+    pub timestamp: i64,
+}
+
 /// Application shared state (multi-user P2P server)
 pub struct AppState {
     /// Database for storing all users and their data
@@ -31,6 +43,8 @@ pub struct AppState {
     pub file_manager: Arc<FileTransferManager>,
     /// Received files per user (user_id -> list of received files)
     pub received_files: Arc<TokioMutex<HashMap<i64, Vec<ReceivedFile>>>>,
+    /// Outgoing transfer statuses (transfer_id -> status)
+    pub outgoing_transfers: Arc<TokioMutex<HashMap<String, OutgoingTransferStatus>>>,
 }
 
 /// User identity with session info

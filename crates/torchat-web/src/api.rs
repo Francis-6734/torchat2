@@ -911,46 +911,89 @@ pub async fn send_file(
     let transfer_id: [u8; 16] = torchat_core::crypto::random_bytes();
     let transfer_id_hex = hex::encode(transfer_id);
 
+    // Store initial transfer status
+    {
+        let mut transfers = state.outgoing_transfers.lock().await;
+        transfers.insert(transfer_id_hex.clone(), crate::models::OutgoingTransferStatus {
+            transfer_id: transfer_id_hex.clone(),
+            filename: filename.clone(),
+            to: to_address.clone(),
+            size: file_size,
+            status: "connecting".to_string(),
+            error: None,
+            timestamp: chrono::Utc::now().timestamp(),
+        });
+    }
+
     // Get Tor config
     let tor_config = torchat_core::tor::TorConnectionConfig::default();
 
     // Spawn task to send file via TCP stream
     let temp_path_clone = temp_path.clone();
+    let state_clone = state.clone();
+    let transfer_id_hex_clone = transfer_id_hex.clone();
+    let to_address_clone = to_address.clone();
+    let filename_clone = filename.clone();
+
     tokio::spawn(async move {
         info!(
             to = %to_address,
             filename = %filename,
             size = file_size,
+            transfer_id = %transfer_id_hex_clone,
             "Starting TCP stream file transfer"
         );
 
-        match torchat_core::messaging::send_file_stream(
+        // Update status to transferring
+        {
+            let mut transfers = state_clone.outgoing_transfers.lock().await;
+            if let Some(status) = transfers.get_mut(&transfer_id_hex_clone) {
+                status.status = "transferring".to_string();
+            }
+        }
+
+        let result = torchat_core::messaging::send_file_stream(
             temp_path_clone.clone(),
             &to_address,
             &sender_address,
             &tor_config,
-        ).await {
-            Ok(result) => {
-                if result.success {
-                    info!(
-                        transfer_id = ?result.transfer_id,
-                        to = %to_address,
-                        "File transfer completed successfully"
-                    );
-                } else {
-                    warn!(
-                        transfer_id = ?result.transfer_id,
-                        error = ?result.error,
-                        "File transfer failed"
-                    );
+        ).await;
+
+        // Update final status
+        {
+            let mut transfers = state_clone.outgoing_transfers.lock().await;
+            if let Some(status) = transfers.get_mut(&transfer_id_hex_clone) {
+                match &result {
+                    Ok(r) if r.success => {
+                        status.status = "completed".to_string();
+                        info!(
+                            transfer_id = %transfer_id_hex_clone,
+                            to = %to_address_clone,
+                            filename = %filename_clone,
+                            "File transfer completed successfully"
+                        );
+                    }
+                    Ok(r) => {
+                        status.status = "failed".to_string();
+                        status.error = r.error.clone();
+                        warn!(
+                            transfer_id = %transfer_id_hex_clone,
+                            to = %to_address_clone,
+                            error = ?r.error,
+                            "File transfer failed"
+                        );
+                    }
+                    Err(e) => {
+                        status.status = "failed".to_string();
+                        status.error = Some(e.to_string());
+                        warn!(
+                            transfer_id = %transfer_id_hex_clone,
+                            to = %to_address_clone,
+                            error = %e,
+                            "File transfer error"
+                        );
+                    }
                 }
-            }
-            Err(e) => {
-                warn!(
-                    to = %to_address,
-                    error = %e,
-                    "File transfer error"
-                );
             }
         }
 
@@ -976,7 +1019,7 @@ pub async fn file_transfer_status(
     Path(transfer_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> (StatusCode, Json<ApiResponse<FileTransferResponse>>) {
-    let (user_id, _, _) = match get_current_user(&headers, &state).await {
+    let (_user_id, _, _) = match get_current_user(&headers, &state).await {
         Ok(user) => user,
         Err((status, json)) => {
             return (status, Json(ApiResponse {
@@ -987,63 +1030,18 @@ pub async fn file_transfer_status(
         }
     };
 
-    // Get daemon
-    let daemons = state.daemons.lock().await;
-    let daemon = match daemons.get(&user_id) {
-        Some(d) => d.clone(),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    error: Some("P2P daemon not running".to_string()),
-                }),
-            );
-        }
-    };
-    drop(daemons);
-
-    // Parse transfer ID from hex
-    let transfer_id_bytes: [u8; 16] = match hex::decode(&transfer_id) {
-        Ok(bytes) if bytes.len() == 16 => {
-            let mut arr = [0u8; 16];
-            arr.copy_from_slice(&bytes);
-            arr
-        }
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    error: Some("Invalid transfer ID".to_string()),
-                }),
-            );
-        }
-    };
-
-    // Get transfer status from file manager
-    use torchat_core::messaging::TransferState;
-    let file_mgr = daemon.file_transfer_manager();
-    match file_mgr.get_outgoing_status(&transfer_id_bytes).await {
-        Some((filename, size, state, progress)) => {
-            let status_str = match state {
-                TransferState::Pending => "pending",
-                TransferState::Active => "active",
-                TransferState::Completed => "completed",
-                TransferState::Failed => "failed",
-                TransferState::Cancelled => "cancelled",
-            };
-
+    // Get transfer status from our tracking
+    let transfers = state.outgoing_transfers.lock().await;
+    match transfers.get(&transfer_id) {
+        Some(status) => {
             (
                 StatusCode::OK,
                 Json(ApiResponse::ok(FileTransferResponse {
-                    transfer_id,
-                    filename,
-                    size,
-                    status: status_str.to_string(),
-                    progress: progress as f32,
+                    transfer_id: status.transfer_id.clone(),
+                    filename: status.filename.clone(),
+                    size: status.size,
+                    status: status.status.clone(),
+                    progress: if status.status == "completed" { 100.0 } else { 0.0 },
                 })),
             )
         }
@@ -1112,6 +1110,28 @@ pub async fn add_received_file(
         output_path,
         timestamp: chrono::Utc::now().timestamp(),
     });
+}
+
+/// List all outgoing transfers for current user
+pub async fn list_outgoing_transfers(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<ApiResponse<Vec<crate::models::OutgoingTransferStatus>>>) {
+    let (_user_id, _, _) = match get_current_user(&headers, &state).await {
+        Ok(user) => user,
+        Err((status, json)) => {
+            return (status, Json(ApiResponse {
+                success: false,
+                data: None,
+                error: json.0.error,
+            }));
+        }
+    };
+
+    let transfers = state.outgoing_transfers.lock().await;
+    let all_transfers: Vec<_> = transfers.values().cloned().collect();
+
+    (StatusCode::OK, Json(ApiResponse::ok(all_transfers)))
 }
 
 // ==================== Voice Call API ====================
@@ -1313,4 +1333,105 @@ pub async fn hangup_call(
             status: "ended".to_string(),
         })),
     )
+}
+
+// ==================== Diagnostic API ====================
+
+/// Request to test connectivity
+#[derive(Debug, serde::Deserialize)]
+pub struct TestConnectivityRequest {
+    /// Target onion address to test
+    pub address: String,
+}
+
+/// Connectivity test result
+#[derive(Debug, serde::Serialize)]
+pub struct ConnectivityResult {
+    pub address: String,
+    pub reachable: bool,
+    pub latency_ms: Option<u64>,
+    pub error: Option<String>,
+}
+
+/// Test connectivity to an onion address via Tor
+pub async fn test_connectivity(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<TestConnectivityRequest>,
+) -> (StatusCode, Json<ApiResponse<ConnectivityResult>>) {
+    let (user_id, _, _) = match get_current_user(&headers, &state).await {
+        Ok(user) => user,
+        Err((status, json)) => {
+            return (status, Json(ApiResponse {
+                success: false,
+                data: None,
+                error: json.0.error,
+            }));
+        }
+    };
+
+    info!(user_id, address = %request.address, "Testing connectivity to peer");
+
+    // Parse and validate address
+    let peer_addr = match torchat_core::identity::OnionAddress::from_string(&request.address) {
+        Ok(addr) => addr,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok(ConnectivityResult {
+                    address: request.address,
+                    reachable: false,
+                    latency_ms: None,
+                    error: Some("Invalid onion address format".to_string()),
+                })),
+            );
+        }
+    };
+
+    // Try to connect via Tor
+    let tor_config = torchat_core::tor::TorConnectionConfig::default();
+    let start = std::time::Instant::now();
+
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        torchat_core::tor::TorConnection::connect(&tor_config, &peer_addr)
+    ).await {
+        Ok(Ok(_conn)) => {
+            let latency = start.elapsed().as_millis() as u64;
+            info!(address = %request.address, latency_ms = latency, "Connectivity test successful");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::ok(ConnectivityResult {
+                    address: request.address,
+                    reachable: true,
+                    latency_ms: Some(latency),
+                    error: None,
+                })),
+            )
+        }
+        Ok(Err(e)) => {
+            warn!(address = %request.address, error = %e, "Connectivity test failed");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::ok(ConnectivityResult {
+                    address: request.address,
+                    reachable: false,
+                    latency_ms: None,
+                    error: Some(format!("Connection failed: {}", e)),
+                })),
+            )
+        }
+        Err(_) => {
+            warn!(address = %request.address, "Connectivity test timed out");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::ok(ConnectivityResult {
+                    address: request.address,
+                    reachable: false,
+                    latency_ms: None,
+                    error: Some("Connection timed out (60s)".to_string()),
+                })),
+            )
+        }
+    }
 }
