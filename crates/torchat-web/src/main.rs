@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
+use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::services::ServeDir;
 use tracing::{info, warn};
 
@@ -203,10 +204,25 @@ async fn main() -> anyhow::Result<()> {
         ])
         .max_age(Duration::from_secs(3600));
 
+    // Maximum request body size for file uploads (7GB to accommodate 5GB files with base64 overhead)
+    const FILE_UPLOAD_BODY_LIMIT: usize = 7 * 1024 * 1024 * 1024; // 7GB
+
+    // Default body limit for regular API requests (10MB)
+    const DEFAULT_BODY_LIMIT: usize = 10 * 1024 * 1024; // 10MB
+
+    // File upload routes with large body limit
+    let file_upload_routes = Router::new()
+        .route("/api/files/send", post(api::send_file))
+        .route("/api/files/upload", post(api::send_file_multipart))
+        .layer(RequestBodyLimitLayer::new(FILE_UPLOAD_BODY_LIMIT));
+
     // Build router with security middleware
     let app = Router::new()
         // Static files
         .nest_service("/static", ServeDir::new("public"))
+
+        // Merge file upload routes with large body limit
+        .merge(file_upload_routes)
 
         // API routes - Multi-user P2P system
         .route("/", get(handlers::index))
@@ -222,8 +238,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/daemon/start", post(api::start_daemon))
         .route("/api/daemon/stop", post(api::stop_daemon))
         .route("/api/daemon/status", get(api::daemon_status))
-        // File transfer
-        .route("/api/files/send", post(api::send_file))
+        // File transfer (other endpoints)
         .route("/api/files/status/:transfer_id", get(api::file_transfer_status))
         .route("/api/files/outgoing", get(api::list_outgoing_transfers))
         .route("/api/files/received/:contact_address", get(api::list_received_files))
@@ -237,6 +252,8 @@ async fn main() -> anyhow::Result<()> {
         // Diagnostic - test connectivity
         .route("/api/diagnostic/connectivity", post(api::test_connectivity))
 
+        // Apply default body limit for other routes
+        .layer(RequestBodyLimitLayer::new(DEFAULT_BODY_LIMIT))
         // Apply security middleware
         .layer(middleware::from_fn(security_headers_middleware))
         .layer(middleware::from_fn(rate_limit_middleware))

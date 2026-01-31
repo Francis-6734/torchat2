@@ -1186,20 +1186,36 @@
             const timeEl = fileEl.querySelector('.message-time');
 
             try {
-                // Read file as base64
-                timeEl.textContent = 'Reading file...';
+                // Check file size limit (5GB)
+                const MAX_FILE_SIZE = 5 * 1024 * 1024 * 1024;
+                if (file.size > MAX_FILE_SIZE) {
+                    throw new Error(`File size exceeds maximum limit of 5GB`);
+                }
+
+                timeEl.textContent = 'Uploading...';
                 progressBar.style.width = '10%';
 
-                const fileData = await readFileAsBase64(file);
-                progressBar.style.width = '30%';
-                timeEl.textContent = 'Sending...';
+                // Use FormData for efficient multipart upload (no base64 overhead)
+                const formData = new FormData();
+                formData.append('to', currentContact.address);
+                formData.append('filename', file.name);
+                formData.append('file', file);
 
-                // Send file via API
-                const result = await api('/api/files/send', 'POST', {
-                    to: currentContact.address,
-                    filename: file.name,
-                    file_data: fileData
+                // Upload using fetch with multipart/form-data
+                const response = await fetch('/api/files/upload', {
+                    method: 'POST',
+                    body: formData
+                    // Note: Don't set Content-Type header - browser will set it with boundary
                 });
+
+                progressBar.style.width = '70%';
+
+                let result;
+                try {
+                    result = await response.json();
+                } catch (e) {
+                    throw new Error('Server returned invalid response');
+                }
 
                 if (result.success) {
                     progressBar.style.width = '100%';

@@ -12,7 +12,7 @@ torchat-core.path = "../torchat-core"
 # Web framework
 axum = "0.7"
 tower = "0.4"
-tower-http = { version = "0.5", features = ["trace", "cors", "fs"] }
+tower-http = { version = "0.5", features = ["trace", "cors", "fs", "limit"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = "1"
@@ -32,6 +32,11 @@ hex = "0.4"
 rand = { workspace = true }
 base64 = "0.22"
 urlencoding = "2.1"
+
+# Multipart form handling
+axum-extra = { version = "0.9", features = ["multipart"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures-util = "0.3"
 
 [[bin]]
 name = "torchat-web"

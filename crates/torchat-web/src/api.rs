@@ -10,9 +10,10 @@ use axum::{
     Json,
     response::{IntoResponse, Response},
 };
+use axum_extra::extract::Multipart;
 use serde::Serialize;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::models::*;
 use torchat_core::identity::{generate_identity, TorIdentity};
@@ -1033,6 +1034,270 @@ pub async fn send_file(
     )
 }
 
+/// Send a file using multipart/form-data (more efficient for large files)
+pub async fn send_file_multipart(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> (StatusCode, Json<ApiResponse<FileTransferResponse>>) {
+    let (user_id, identity, _) = match get_current_user(&headers, &state).await {
+        Ok(user) => user,
+        Err((status, json)) => {
+            return (status, Json(ApiResponse {
+                success: false,
+                data: None,
+                error: json.0.error,
+            }));
+        }
+    };
+
+    // Verify daemon is running (for Tor config)
+    let daemons = state.daemons.lock().await;
+    if !daemons.contains_key(&user_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some("P2P daemon not running. Start daemon first.".to_string()),
+            }),
+        );
+    }
+    drop(daemons);
+
+    let mut to_address: Option<String> = None;
+    let mut filename: Option<String> = None;
+    let mut file_data: Option<Vec<u8>> = None;
+
+    // Process multipart fields
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let field_name: String = field.name().unwrap_or("").to_string();
+
+        match field_name.as_str() {
+            "to" => {
+                if let Ok(value) = field.text().await {
+                    to_address = Some(value);
+                }
+            }
+            "filename" => {
+                if let Ok(value) = field.text().await {
+                    filename = Some(value);
+                }
+            }
+            "file" => {
+                // Get filename from the field if not already set
+                if filename.is_none() {
+                    filename = field.file_name().map(|s: &str| s.to_string());
+                }
+                // Read file data
+                match field.bytes().await {
+                    Ok(bytes) => {
+                        let data: Vec<u8> = bytes.to_vec();
+                        file_data = Some(data);
+                    }
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(ApiResponse {
+                                success: false,
+                                data: None,
+                                error: Some(format!("Failed to read file data: {}", e)),
+                            }),
+                        );
+                    }
+                }
+            }
+            _ => {
+                // Ignore unknown fields
+            }
+        }
+    }
+
+    // Validate required fields
+    let to_address = match to_address {
+        Some(addr) => addr,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Missing 'to' field (recipient address)".to_string()),
+                }),
+            );
+        }
+    };
+
+    let filename = match filename {
+        Some(name) => name,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Missing filename".to_string()),
+                }),
+            );
+        }
+    };
+
+    let file_data = match file_data {
+        Some(data) => data,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Missing 'file' field".to_string()),
+                }),
+            );
+        }
+    };
+
+    // Check file size limit (5GB max)
+    if file_data.len() as u64 > MAX_FILE_SIZE {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(format!(
+                    "File size {} bytes exceeds maximum allowed size of {} bytes (5GB)",
+                    file_data.len(), MAX_FILE_SIZE
+                )),
+            }),
+        );
+    }
+
+    let file_size = file_data.len() as u64;
+
+    // Save to temp file
+    let temp_dir = std::env::temp_dir();
+    let temp_filename = format!("torchat_upload_{}", uuid::Uuid::new_v4());
+    let temp_path = temp_dir.join(&temp_filename);
+
+    if let Err(e) = std::fs::write(&temp_path, &file_data) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Failed to save file: {}", e)),
+            }),
+        );
+    }
+
+    let filename_for_response = filename.clone();
+    let sender_address = identity.onion_address().to_string();
+
+    // Generate transfer ID for tracking
+    let transfer_id: [u8; 16] = torchat_core::crypto::random_bytes();
+    let transfer_id_hex = hex::encode(transfer_id);
+
+    // Store initial transfer status
+    {
+        let mut transfers = state.outgoing_transfers.lock().await;
+        transfers.insert(transfer_id_hex.clone(), crate::models::OutgoingTransferStatus {
+            transfer_id: transfer_id_hex.clone(),
+            filename: filename.clone(),
+            to: to_address.clone(),
+            size: file_size,
+            status: "connecting".to_string(),
+            error: None,
+            timestamp: chrono::Utc::now().timestamp(),
+        });
+    }
+
+    // Get Tor config
+    let tor_config = torchat_core::tor::TorConnectionConfig::default();
+
+    // Spawn task to send file via TCP stream
+    let temp_path_clone = temp_path.clone();
+    let state_clone = state.clone();
+    let transfer_id_hex_clone = transfer_id_hex.clone();
+    let to_address_clone = to_address.clone();
+    let filename_clone = filename.clone();
+
+    tokio::spawn(async move {
+        info!(
+            to = %to_address,
+            filename = %filename,
+            size = file_size,
+            transfer_id = %transfer_id_hex_clone,
+            "Starting TCP stream file transfer (multipart upload)"
+        );
+
+        // Update status to transferring
+        {
+            let mut transfers = state_clone.outgoing_transfers.lock().await;
+            if let Some(status) = transfers.get_mut(&transfer_id_hex_clone) {
+                status.status = "transferring".to_string();
+            }
+        }
+
+        let result = torchat_core::messaging::send_file_stream(
+            temp_path_clone.clone(),
+            &to_address,
+            &sender_address,
+            &tor_config,
+        ).await;
+
+        // Update final status
+        {
+            let mut transfers = state_clone.outgoing_transfers.lock().await;
+            if let Some(status) = transfers.get_mut(&transfer_id_hex_clone) {
+                match &result {
+                    Ok(r) if r.success => {
+                        status.status = "completed".to_string();
+                        info!(
+                            transfer_id = %transfer_id_hex_clone,
+                            to = %to_address_clone,
+                            filename = %filename_clone,
+                            "File transfer completed successfully"
+                        );
+                    }
+                    Ok(r) => {
+                        status.status = "failed".to_string();
+                        status.error = r.error.clone();
+                        warn!(
+                            transfer_id = %transfer_id_hex_clone,
+                            to = %to_address_clone,
+                            error = ?r.error,
+                            "File transfer failed"
+                        );
+                    }
+                    Err(e) => {
+                        status.status = "failed".to_string();
+                        status.error = Some(e.to_string());
+                        warn!(
+                            transfer_id = %transfer_id_hex_clone,
+                            to = %to_address_clone,
+                            error = %e,
+                            "File transfer error"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Clean up temp file
+        let _ = std::fs::remove_file(&temp_path_clone);
+    });
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse::ok(FileTransferResponse {
+            transfer_id: transfer_id_hex,
+            filename: filename_for_response,
+            size: file_size,
+            status: "transferring".to_string(),
+            progress: 0.0,
+        })),
+    )
+}
+
 /// Get file transfer status
 pub async fn file_transfer_status(
     headers: HeaderMap,
@@ -1307,7 +1572,7 @@ pub async fn start_call(
     use torchat_core::protocol::CallSignalType;
     use torchat_core::messaging::DaemonCommand;
 
-    let (user_id, identity, _) = match get_current_user(&headers, &state).await {
+    let (user_id, _identity, _) = match get_current_user(&headers, &state).await {
         Ok(user) => user,
         Err((status, json)) => {
             return (status, Json(ApiResponse {
@@ -1379,9 +1644,6 @@ pub async fn answer_call(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CallActionRequest>,
 ) -> (StatusCode, Json<ApiResponse<CallResponse>>) {
-    use torchat_core::protocol::CallSignalType;
-    use torchat_core::messaging::DaemonCommand;
-
     let (user_id, _, _) = match get_current_user(&headers, &state).await {
         Ok(user) => user,
         Err((status, json)) => {
@@ -1394,7 +1656,7 @@ pub async fn answer_call(
     };
 
     // Parse call ID
-    let call_id: [u8; 16] = match hex::decode(&request.call_id) {
+    let _call_id: [u8; 16] = match hex::decode(&request.call_id) {
         Ok(bytes) if bytes.len() == 16 => {
             let mut arr = [0u8; 16];
             arr.copy_from_slice(&bytes);
@@ -1414,7 +1676,7 @@ pub async fn answer_call(
 
     // Get daemon
     let daemons = state.daemons.lock().await;
-    let daemon = match daemons.get(&user_id) {
+    let _daemon = match daemons.get(&user_id) {
         Some(d) => d.clone(),
         None => {
             return (
@@ -1449,10 +1711,7 @@ pub async fn hangup_call(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CallActionRequest>,
 ) -> (StatusCode, Json<ApiResponse<CallResponse>>) {
-    use torchat_core::protocol::CallSignalType;
-    use torchat_core::messaging::DaemonCommand;
-
-    let (user_id, _, _) = match get_current_user(&headers, &state).await {
+    let (_user_id, _, _) = match get_current_user(&headers, &state).await {
         Ok(user) => user,
         Err((status, json)) => {
             return (status, Json(ApiResponse {

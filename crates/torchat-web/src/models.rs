@@ -35,6 +35,7 @@ pub struct AppState {
     /// Database for storing all users and their data
     pub database: Arc<TokioMutex<Database>>,
     /// Data directory
+    #[allow(dead_code)]
     pub data_dir: String,
     /// Daemons managing P2P connections for each user
     pub daemons: Arc<TokioMutex<HashMap<i64, Arc<MessagingDaemon>>>>,
