@@ -819,6 +819,9 @@ pub async fn list_users(
 
 // ==================== File Transfer API ====================
 
+/// Maximum file size for transfers (5GB).
+const MAX_FILE_SIZE: u64 = 5 * 1024 * 1024 * 1024;
+
 /// Request to send a file
 #[derive(Debug, serde::Deserialize)]
 pub struct SendFileRequest {
@@ -886,6 +889,21 @@ pub async fn send_file(
             );
         }
     };
+
+    // Check file size limit (5GB max)
+    if file_data.len() as u64 > MAX_FILE_SIZE {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(format!(
+                    "File size {} bytes exceeds maximum allowed size of {} bytes (5GB)",
+                    file_data.len(), MAX_FILE_SIZE
+                )),
+            }),
+        );
+    }
 
     // Save to temp file
     let temp_dir = std::env::temp_dir();

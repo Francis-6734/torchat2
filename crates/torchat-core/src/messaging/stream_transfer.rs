@@ -19,6 +19,9 @@ const MAX_METADATA_SIZE: usize = 65536;
 /// Chunk size for streaming (64KB).
 const STREAM_CHUNK_SIZE: usize = 65536;
 
+/// Maximum file size for transfers (5GB).
+pub const MAX_FILE_SIZE: u64 = 5 * 1024 * 1024 * 1024;
+
 /// File transfer metadata sent at start of stream.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StreamFileMetadata {
@@ -69,6 +72,14 @@ pub async fn send_file_stream(
     let file = File::open(&file_path).await?;
     let file_metadata = file.metadata().await?;
     let file_size = file_metadata.len();
+
+    // Check file size limit
+    if file_size > MAX_FILE_SIZE {
+        return Err(Error::Protocol(format!(
+            "File size {} bytes exceeds maximum allowed size of {} bytes (5GB)",
+            file_size, MAX_FILE_SIZE
+        )));
+    }
 
     let filename = file_path
         .file_name()
@@ -244,6 +255,26 @@ pub async fn receive_file_stream(
 
     let metadata: StreamFileMetadata = bincode::deserialize(&metadata_buf)
         .map_err(|e| Error::Encoding(format!("Failed to parse metadata: {}", e)))?;
+
+    // Check file size limit
+    if metadata.size > MAX_FILE_SIZE {
+        warn!(
+            from = %metadata.sender_address,
+            filename = %metadata.filename,
+            size = metadata.size,
+            max_size = MAX_FILE_SIZE,
+            "Rejecting file: exceeds size limit"
+        );
+        // Send failure acknowledgment
+        if let Err(e) = stream.write_all(&[0x00]).await {
+            warn!(error = %e, "Failed to send rejection acknowledgment");
+        }
+        let _ = stream.flush().await;
+        return Err(Error::Protocol(format!(
+            "File size {} bytes exceeds maximum allowed size of {} bytes (5GB)",
+            metadata.size, MAX_FILE_SIZE
+        )));
+    }
 
     info!(
         from = %metadata.sender_address,
