@@ -2023,8 +2023,9 @@ pub async fn send_group_invite(
     drop(daemons);
 
     use torchat_core::messaging::DaemonCommand;
-    if let Err(e) = daemon.command_sender().send(DaemonCommand::GenerateGroupInvite {
+    if let Err(e) = daemon.command_sender().send(DaemonCommand::SendGroupInvite {
         group_id: group_id_bytes,
+        invitee_onion: request.invitee_onion.clone(),
         expires_at: chrono::Utc::now().timestamp() + 86400, // 24 hours
     }).await {
         return (

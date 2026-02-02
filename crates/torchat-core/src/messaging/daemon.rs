@@ -237,6 +237,13 @@ pub enum DaemonEvent {
         /// Invite token.
         invite: crate::protocol::GroupInvitePayload,
     },
+    /// Group invite successfully sent to invitee.
+    GroupInviteSent {
+        /// Group ID.
+        group_id: [u8; 32],
+        /// Invitee onion address.
+        invitee: String,
+    },
     /// Group invite received.
     GroupInviteReceived {
         /// Invite token.
@@ -391,10 +398,12 @@ pub enum DaemonCommand {
         /// Group policy.
         policy: crate::protocol::GroupPolicy,
     },
-    /// Generate an invite token for a group.
-    GenerateGroupInvite {
+    /// Generate and send an invite token for a group.
+    SendGroupInvite {
         /// Group ID.
         group_id: [u8; 32],
+        /// Invitee's onion address.
+        invitee_onion: String,
         /// Expiration timestamp (Unix seconds).
         expires_at: i64,
     },
@@ -1015,6 +1024,10 @@ impl MessagingDaemon {
                 // Handle file offer on direct connection
                 Self::handle_file_offer_packet(&packet, &sessions, &event_tx).await
             }
+            PacketType::GroupInvite => {
+                // Handle incoming group invite
+                Self::handle_group_invite_packet(&packet, &event_tx).await
+            }
             PacketType::GroupMessage => {
                 // Handle group message (gossip)
                 Self::handle_group_message_packet(&packet, &event_tx, &group_sessions).await
@@ -1141,6 +1154,12 @@ impl MessagingDaemon {
                                 &packet, &peer_address, &sessions, &event_tx
                             ).await {
                                 warn!(error = %e, "Failed to handle file offer");
+                            }
+                        }
+                        PacketType::GroupInvite => {
+                            // Handle incoming group invite
+                            if let Err(e) = Self::handle_group_invite_packet(&packet, &event_tx).await {
+                                warn!(error = %e, "Failed to handle group invite");
                             }
                         }
                         PacketType::GroupMessage => {
@@ -1625,17 +1644,82 @@ impl MessagingDaemon {
                         }
                     }
                 }
-                DaemonCommand::GenerateGroupInvite { group_id, expires_at } => {
+                DaemonCommand::SendGroupInvite { group_id, invitee_onion, expires_at } => {
                     let groups = group_sessions.read().await;
                     if let Some(session) = groups.get(&group_id) {
                         let bootstrap_peer = identity.onion_address().to_string();
                         match session.generate_invite(expires_at, &bootstrap_peer) {
                             Ok(invite) => {
+                                // Emit event for local tracking
                                 let _ = event_tx.send(DaemonEvent::GroupInviteGenerated {
                                     group_id,
                                     invite: invite.clone(),
                                 });
-                                info!(group_id = ?group_id, "Group invite generated");
+
+                                // Actually send the invite to the invitee over the network
+                                let invite_bytes = match invite.to_bytes() {
+                                    Ok(bytes) => bytes,
+                                    Err(e) => {
+                                        warn!(error = %e, "Failed to serialize invite");
+                                        continue;
+                                    }
+                                };
+
+                                // Create the packet
+                                let packet = match Packet::new(PacketType::GroupInvite, invite_bytes) {
+                                    Ok(p) => p,
+                                    Err(e) => {
+                                        warn!(error = %e, "Failed to create invite packet");
+                                        continue;
+                                    }
+                                };
+
+                                // Connect to invitee and send the invite
+                                let invitee_clone = invitee_onion.clone();
+                                let tor_config_clone = tor_config.clone();
+                                let event_tx_clone = event_tx.clone();
+
+                                tokio::spawn(async move {
+                                    // Parse invitee onion address
+                                    let peer_addr = match OnionAddress::from_string(&invitee_clone) {
+                                        Ok(addr) => addr,
+                                        Err(_) => {
+                                            warn!(invitee = %invitee_clone, "Invalid invitee onion address");
+                                            let _ = event_tx_clone.send(DaemonEvent::Error {
+                                                message: "Invalid invitee onion address".to_string(),
+                                            });
+                                            return;
+                                        }
+                                    };
+
+                                    match TorConnection::connect(&tor_config_clone, &peer_addr).await {
+                                        Ok(mut conn) => {
+                                            match Self::write_packet(conn.stream_mut(), &packet).await {
+                                                Ok(_) => {
+                                                    info!(invitee = %invitee_clone, "Group invite sent successfully");
+                                                    let _ = event_tx_clone.send(DaemonEvent::GroupInviteSent {
+                                                        group_id,
+                                                        invitee: invitee_clone,
+                                                    });
+                                                }
+                                                Err(e) => {
+                                                    warn!(invitee = %invitee_clone, error = %e, "Failed to send invite packet");
+                                                    let _ = event_tx_clone.send(DaemonEvent::Error {
+                                                        message: format!("Failed to send invite: {}", e),
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!(invitee = %invitee_clone, error = %e, "Failed to connect to invitee");
+                                            let _ = event_tx_clone.send(DaemonEvent::Error {
+                                                message: format!("Failed to connect to invitee: {}", e),
+                                            });
+                                        }
+                                    }
+                                });
+
+                                info!(group_id = ?group_id, invitee = %invitee_onion, "Group invite generated and being sent");
                             }
                             Err(e) => {
                                 warn!(group_id = ?group_id, error = %e, "Failed to generate invite");
@@ -2506,6 +2590,28 @@ impl MessagingDaemon {
                 "Received join request for unknown group"
             );
         }
+
+        Ok(())
+    }
+
+    /// Handle incoming group invite packet.
+    async fn handle_group_invite_packet(
+        packet: &Packet,
+        event_tx: &broadcast::Sender<DaemonEvent>,
+    ) -> Result<()> {
+        let invite = crate::protocol::GroupInvitePayload::from_bytes(&packet.payload)?;
+
+        info!(
+            group_id = ?invite.group_id,
+            bootstrap_peer = %invite.bootstrap_peer,
+            expires_at = invite.expires_at,
+            "Received group invite"
+        );
+
+        // Emit event for application layer to handle (show to user)
+        let _ = event_tx.send(DaemonEvent::GroupInviteReceived {
+            invite,
+        });
 
         Ok(())
     }
