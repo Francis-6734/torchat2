@@ -28,6 +28,11 @@ pub use packet::{Packet, PacketHeader, HEADER_SIZE, MAX_PAYLOAD_SIZE};
 pub use types::{
     AckPayload, AckType, CallSignalPayload, CallSignalType, DeletePayload, FileChunkPayload,
     FileOfferPayload, HelloPayload, MessagePayload, PacketType, ReactionPayload, SessionInitPayload,
+    // Group protocol types
+    EncryptedKeyShare, GroupAdminHandoverPayload, GroupCreatePayload, GroupInvitePayload,
+    GroupJoinAcceptPayload, GroupJoinRequestPayload, GroupKeyRotationPayload, GroupMember,
+    GroupMemberLeavePayload, GroupMemberSyncPayload, GroupMessagePayload, GroupNeighborRequestPayload,
+    GroupPolicy, MemberAction, MemberUpdate,
 };
 
 use crate::error::{Error, Result};

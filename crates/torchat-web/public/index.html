@@ -96,6 +96,29 @@
             background: rgba(255,255,255,0.3);
         }
 
+        /* Group menu button - visible on white header */
+        .group-menu-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border: none;
+            color: white;
+            padding: 8px 14px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 18px;
+            font-weight: bold;
+            box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .group-menu-btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        .group-menu-btn:active {
+            transform: scale(0.95);
+        }
+
         /* Tab Navigation */
         .tab-nav {
             display: flex;
@@ -566,6 +589,35 @@
             font-size: 20px;
         }
 
+        /* Group menu styling with gradient background */
+        .group-menu-modal {
+            background: linear-gradient(135deg, #464849 0%, #416fb9 100%) !important;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5) !important;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+        }
+
+        .group-menu-modal h2 {
+            text-align: center;
+            font-size: 22px;
+            margin-bottom: 24px;
+            padding-bottom: 16px;
+            border-bottom: 2px solid rgba(255, 255, 255, 0.3);
+        }
+
+        .group-menu-modal .btn {
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .group-menu-modal .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+        }
+
         .form-group {
             margin-bottom: 16px;
         }
@@ -611,6 +663,28 @@
         .status-message.info {
             background: #e3f2fd;
             color: #1565c0;
+        }
+
+        /* Group-specific styles */
+        .message-sender {
+            font-size: 11px;
+            font-weight: 600;
+            color: #667eea;
+            margin-bottom: 4px;
+        }
+
+        .message.received .message-sender {
+            color: #667eea;
+        }
+
+        .group-actions {
+            display: flex;
+            gap: 8px;
+            margin: 12px;
+        }
+
+        .group-actions button {
+            flex: 1;
         }
 
         /* Loading */
@@ -693,6 +767,7 @@
         <!-- Tabs -->
         <div class="tab-nav" id="tab-nav">
             <button class="tab-btn active" data-tab="chats" onclick="switchTab('chats')">Chats</button>
+            <button class="tab-btn" data-tab="groups" onclick="switchTab('groups')">Groups</button>
             <button class="tab-btn" data-tab="contacts" onclick="switchTab('contacts')">Contacts</button>
             <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">Settings</button>
         </div>
@@ -708,6 +783,17 @@
                     <button class="btn" style="max-width: 200px; margin: 20px auto;" onclick="switchTab('contacts')">Add Contact</button>
                 </div>
                 <div id="recent-chats" style="display: none;"></div>
+            </div>
+
+            <!-- Groups Tab -->
+            <div class="tab-panel" id="groups-panel">
+                <div class="contacts-panel">
+                    <div class="group-actions">
+                        <button class="btn" onclick="openCreateGroupModal()">Create Group</button>
+                        <button class="btn btn-secondary" onclick="openJoinGroupModal()">Join Group</button>
+                    </div>
+                    <div id="groups-list"><div class="empty-state"><p>No groups yet</p></div></div>
+                </div>
             </div>
 
             <!-- Contacts Tab -->
@@ -760,6 +846,23 @@
                     <button class="send-btn" onclick="sendMessage()">&#10148;</button>
                 </div>
             </div>
+
+            <!-- Group Chat View -->
+            <div class="chat-panel" id="group-chat-panel">
+                <div class="chat-header">
+                    <button class="chat-back-btn" onclick="closeGroupChat()">&larr;</button>
+                    <div class="chat-contact-info">
+                        <div class="chat-contact-name" id="group-chat-name">Group</div>
+                        <div class="chat-contact-address" id="group-chat-id"></div>
+                    </div>
+                    <button class="group-menu-btn" onclick="openGroupMenu()">⋮</button>
+                </div>
+                <div class="messages-container" id="group-messages-container"></div>
+                <div class="input-area">
+                    <textarea class="message-input" id="group-message-input" placeholder="Type a message..." rows="1"></textarea>
+                    <button class="send-btn" onclick="sendGroupMessage()">&#10148;</button>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -781,14 +884,70 @@
         </div>
     </div>
 
+    <!-- Create Group Modal -->
+    <div id="create-group-modal" class="modal">
+        <div class="modal-content">
+            <h2>Create Group</h2>
+            <div id="create-group-status"></div>
+            <div class="form-group">
+                <label>Group Name</label>
+                <input type="text" id="group-name" placeholder="My Secret Group" autocomplete="off">
+            </div>
+            <div class="form-group">
+                <label>Max Members</label>
+                <input type="number" id="group-max-size" value="50" min="2" max="100">
+            </div>
+            <div class="form-group">
+                <label style="display: flex; align-items: center; gap: 8px;">
+                    <input type="checkbox" id="group-blind" style="width: auto;">
+                    <span>Blind Membership (members only see neighbors)</span>
+                </label>
+            </div>
+            <button class="btn" onclick="createGroup()">Create Group</button>
+            <button class="btn btn-secondary" onclick="closeCreateGroupModal()">Cancel</button>
+        </div>
+    </div>
+
+    <!-- Join Group Modal -->
+    <div id="join-group-modal" class="modal">
+        <div class="modal-content">
+            <h2>Join Group</h2>
+            <div id="join-group-status"></div>
+            <div class="form-group">
+                <label>Invite Code</label>
+                <input type="text" id="invite-token" placeholder="Paste invite code here" autocomplete="off">
+                <p style="font-size: 12px; color: #888; margin-top: 8px;">
+                    Enter the base64-encoded invite token you received
+                </p>
+            </div>
+            <button class="btn" onclick="joinGroup()">Join Group</button>
+            <button class="btn btn-secondary" onclick="closeJoinGroupModal()">Cancel</button>
+        </div>
+    </div>
+
     <!-- Toast -->
     <div class="toast" id="toast"></div>
 
     <script>
-        let currentContact = null;
-        let myOnionAddress = '';
-        let messagePollingInterval = null;
-        let lastMessageCount = 0;
+        // Utility functions needed by groups.js
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function formatTime(timestamp) {
+            const date = new Date(timestamp * 1000);
+            return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        }
+
+        function showToast(message) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.classList.add('show');
+            setTimeout(() => toast.classList.remove('show'), 3000);
+        }
 
         async function api(endpoint, method = 'GET', body = null) {
             const options = { method, headers: { 'Content-Type': 'application/json' } };
@@ -800,13 +959,13 @@
                 return { success: false, error: e.message };
             }
         }
-
-        function showToast(message) {
-            const toast = document.getElementById('toast');
-            toast.textContent = message;
-            toast.classList.add('show');
-            setTimeout(() => toast.classList.remove('show'), 3000);
-        }
+    </script>
+    <script src="/static/groups.js"></script>
+    <script>
+        let currentContact = null;
+        let myOnionAddress = '';
+        let messagePollingInterval = null;
+        let lastMessageCount = 0;
 
         function switchTab(tabName) {
             document.getElementById('chat-panel').classList.remove('active');
@@ -825,6 +984,7 @@
                 // Already registered, load existing identity
                 setIdentityDisplay(result.data);
                 loadContacts();
+                if (typeof loadGroups !== 'undefined') loadGroups();
                 // Update daemon status - it auto-started on login
                 if (statusEl) {
                     statusEl.className = 'status-message info';
@@ -839,6 +999,7 @@
                     setIdentityDisplay(registerResult.data);
                     showToast('Your unique address has been generated! P2P daemon is starting...');
                     loadContacts();
+                    if (typeof loadGroups !== 'undefined') loadGroups();
                     // Update daemon status - it auto-started on registration
                     if (statusEl) {
                         statusEl.className = 'status-message info';
@@ -1122,18 +1283,6 @@
             document.getElementById('contact-address').value = '';
             document.getElementById('contact-name').value = '';
             document.getElementById('add-contact-status').innerHTML = '';
-        }
-
-        function escapeHtml(text) {
-            if (!text) return '';
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
-
-        function formatTime(timestamp) {
-            const date = new Date(timestamp * 1000);
-            return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         }
 
         document.getElementById('message-input').addEventListener('keypress', (e) => {

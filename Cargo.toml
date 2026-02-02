@@ -68,6 +68,9 @@ audiopus = "0.3.0-rc.0"
 # System info
 hostname = "0.4"
 
+# Data structures
+lru = "0.12"
+
 # Internal crates
 torchat-core = { path = "crates/torchat-core" }
 

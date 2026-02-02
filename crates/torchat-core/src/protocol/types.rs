@@ -50,6 +50,26 @@ pub enum PacketType {
     FileChunk = 0x08,
     /// File transfer offer (metadata).
     FileOffer = 0x09,
+    /// Group creation.
+    GroupCreate = 0x0A,
+    /// Group invite token.
+    GroupInvite = 0x0B,
+    /// Group join request.
+    GroupJoinRequest = 0x0C,
+    /// Group join acceptance.
+    GroupJoinAccept = 0x0D,
+    /// Group message (gossip).
+    GroupMessage = 0x0E,
+    /// Group member synchronization.
+    GroupMemberSync = 0x0F,
+    /// Group epoch key rotation.
+    GroupKeyRotation = 0x10,
+    /// Group admin handover.
+    GroupAdminHandover = 0x11,
+    /// Member leave notification.
+    GroupMemberLeave = 0x12,
+    /// Neighbor request (blind mode).
+    GroupNeighborRequest = 0x13,
 }
 
 impl PacketType {
@@ -65,6 +85,16 @@ impl PacketType {
             0x07 => Ok(Self::CallSignal),
             0x08 => Ok(Self::FileChunk),
             0x09 => Ok(Self::FileOffer),
+            0x0A => Ok(Self::GroupCreate),
+            0x0B => Ok(Self::GroupInvite),
+            0x0C => Ok(Self::GroupJoinRequest),
+            0x0D => Ok(Self::GroupJoinAccept),
+            0x0E => Ok(Self::GroupMessage),
+            0x0F => Ok(Self::GroupMemberSync),
+            0x10 => Ok(Self::GroupKeyRotation),
+            0x11 => Ok(Self::GroupAdminHandover),
+            0x12 => Ok(Self::GroupMemberLeave),
+            0x13 => Ok(Self::GroupNeighborRequest),
             _ => Err(Error::Protocol(format!("unknown packet type: {:#04x}", byte))),
         }
     }
@@ -358,6 +388,393 @@ impl FileOfferPayload {
     }
 }
 
+// ============================================================================
+// Group Protocol Payloads
+// ============================================================================
+
+/// Group policy configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupPolicy {
+    /// Hide full member roster (members only know neighbors).
+    pub blind_membership: bool,
+    /// Maximum number of members allowed.
+    pub max_size: u32,
+    /// Allow members to invite others (or founder-only).
+    pub allow_member_invite: bool,
+    /// Epoch key rotation interval in seconds.
+    pub key_rotation_interval: u64,
+    /// Enable periodic group address rotation.
+    pub address_rotation_enabled: bool,
+}
+
+impl Default for GroupPolicy {
+    fn default() -> Self {
+        Self {
+            blind_membership: true,
+            max_size: 50,
+            allow_member_invite: false,
+            key_rotation_interval: 86400, // 24 hours
+            address_rotation_enabled: false,
+        }
+    }
+}
+
+/// GROUP_CREATE packet payload.
+///
+/// Sent by founder when creating a new group.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupCreatePayload {
+    /// Group ID (hash of group_name + founder_pubkey).
+    pub group_id: [u8; 32],
+    /// Group name (encrypted with initial symmetric key).
+    pub group_name: String,
+    /// Founder's Ed25519 public key.
+    pub founder_pubkey: [u8; 32],
+    /// Founder's signature over group_id.
+    #[serde(with = "serde_signature")]
+    pub founder_signature: [u8; 64],
+    /// Group policy configuration.
+    pub policy: GroupPolicy,
+    /// Creation timestamp.
+    pub created_at: i64,
+}
+
+impl GroupCreatePayload {
+    /// Serialize to bytes.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        bincode::serialize(self).map_err(|e| Error::Encoding(e.to_string()))
+    }
+
+    /// Deserialize from bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        bincode::deserialize(bytes).map_err(|e| Error::Encoding(e.to_string()))
+    }
+}
+
+/// GROUP_INVITE packet payload.
+///
+/// Cryptographic invite token that cannot be forged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupInvitePayload {
+    /// Group ID this invite is for.
+    pub group_id: [u8; 32],
+    /// Inviter's Ed25519 public key.
+    pub inviter_pubkey: [u8; 32],
+    /// Bootstrap peer onion address (founder or another member).
+    pub bootstrap_peer: String,
+    /// Expiration timestamp (Unix seconds).
+    pub expires_at: i64,
+    /// Unique invite ID for revocation.
+    pub invite_id: [u8; 16],
+    /// Encrypted metadata (group name, policy hints).
+    pub encrypted_metadata: Vec<u8>,
+    /// Signature over invite fields.
+    #[serde(with = "serde_signature")]
+    pub invite_signature: [u8; 64],
+}
+
+impl GroupInvitePayload {
+    /// Serialize to bytes.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        bincode::serialize(self).map_err(|e| Error::Encoding(e.to_string()))
+    }
+
+    /// Deserialize from bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        bincode::deserialize(bytes).map_err(|e| Error::Encoding(e.to_string()))
+    }
+}
+
+/// GROUP_JOIN_REQUEST packet payload.
+///
+/// Sent by new member to join a group.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupJoinRequestPayload {
+    /// Group ID to join.
+    pub group_id: [u8; 32],
+    /// Requester's onion address.
+    pub requester_onion: String,
+    /// Requester's Ed25519 public key.
+    pub requester_pubkey: [u8; 32],
+    /// Requester's X25519 public key for epoch key encryption.
+    pub requester_x25519_pubkey: [u8; 32],
+    /// Invite token proving authorization.
+    pub invite_token: GroupInvitePayload,
+    /// Signature over join request.
+    #[serde(with = "serde_signature")]
+    pub request_signature: [u8; 64],
+}
+
+impl GroupJoinRequestPayload {
+    /// Serialize to bytes.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        bincode::serialize(self).map_err(|e| Error::Encoding(e.to_string()))
+    }
+
+    /// Deserialize from bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        bincode::deserialize(bytes).map_err(|e| Error::Encoding(e.to_string()))
+    }
+}
+
+/// Group member information.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupMember {
+    /// Anonymous member ID (derived from pubkey + group_id).
+    pub member_id: [u8; 16],
+    /// Member's onion address (optional in blind mode).
+    pub onion_address: Option<String>,
+    /// Member's Ed25519 public key.
+    pub pubkey: [u8; 32],
+    /// Is this member an admin.
+    pub is_admin: bool,
+    /// Join timestamp.
+    pub joined_at: i64,
+}
+
+/// GROUP_JOIN_ACCEPT packet payload.
+///
+/// Sent by founder/admin to approve membership.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupJoinAcceptPayload {
+    /// Group ID.
+    pub group_id: [u8; 32],
+    /// New member's onion address.
+    pub member_onion: String,
+    /// Current epoch key (encrypted for new member).
+    pub current_epoch_key: Vec<u8>,
+    /// Current epoch number.
+    pub epoch_number: u64,
+    /// Full member list (None if blind mode).
+    pub member_list: Option<Vec<GroupMember>>,
+    /// Initial neighbor list (3-5 onion addresses).
+    pub neighbor_list: Vec<String>,
+    /// Encrypted group metadata (name, policy).
+    pub encrypted_metadata: Vec<u8>,
+    /// Acceptor's signature.
+    #[serde(with = "serde_signature")]
+    pub acceptor_signature: [u8; 64],
+}
+
+impl GroupJoinAcceptPayload {
+    /// Serialize to bytes.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        bincode::serialize(self).map_err(|e| Error::Encoding(e.to_string()))
+    }
+
+    /// Deserialize from bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        bincode::deserialize(bytes).map_err(|e| Error::Encoding(e.to_string()))
+    }
+}
+
+/// GROUP_MESSAGE packet payload.
+///
+/// Gossip-replicated group message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupMessagePayload {
+    /// Group ID.
+    pub group_id: [u8; 32],
+    /// Message ID (hash of timestamp + sender_key + nonce).
+    pub msg_id: [u8; 32],
+    /// Epoch number for encryption.
+    pub epoch_number: u64,
+    /// Anonymous sender ID.
+    pub sender_anon_id: [u8; 16],
+    /// Encrypted message content (with epoch key).
+    pub ciphertext: Vec<u8>,
+    /// Sender's signature (proves membership).
+    #[serde(with = "serde_signature")]
+    pub sender_signature: [u8; 64],
+    /// Message timestamp.
+    pub timestamp: i64,
+    /// Gossip hop count (TTL).
+    pub hop_count: u8,
+}
+
+impl GroupMessagePayload {
+    /// Serialize to bytes.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        bincode::serialize(self).map_err(|e| Error::Encoding(e.to_string()))
+    }
+
+    /// Deserialize from bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        bincode::deserialize(bytes).map_err(|e| Error::Encoding(e.to_string()))
+    }
+}
+
+/// Member action type for synchronization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MemberAction {
+    /// Member joined the group.
+    Joined { pubkey: [u8; 32] },
+    /// Member left the group.
+    Left,
+    /// Member promoted to admin.
+    PromotedToAdmin,
+}
+
+/// Member update for synchronization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemberUpdate {
+    /// Member ID.
+    pub member_id: [u8; 16],
+    /// Action performed.
+    pub action: MemberAction,
+    /// Timestamp of action.
+    pub timestamp: i64,
+}
+
+/// GROUP_MEMBER_SYNC packet payload.
+///
+/// Synchronizes member changes across the mesh.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupMemberSyncPayload {
+    /// Group ID.
+    pub group_id: [u8; 32],
+    /// List of member updates.
+    pub member_updates: Vec<MemberUpdate>,
+    /// Sender's signature.
+    #[serde(with = "serde_signature")]
+    pub sender_signature: [u8; 64],
+}
+
+impl GroupMemberSyncPayload {
+    /// Serialize to bytes.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        bincode::serialize(self).map_err(|e| Error::Encoding(e.to_string()))
+    }
+
+    /// Deserialize from bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        bincode::deserialize(bytes).map_err(|e| Error::Encoding(e.to_string()))
+    }
+}
+
+/// Encrypted key share for a member.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncryptedKeyShare {
+    /// Member ID this key is for.
+    pub member_id: [u8; 16],
+    /// Epoch key encrypted to member's public key.
+    pub encrypted_key: Vec<u8>,
+}
+
+/// GROUP_KEY_ROTATION packet payload.
+///
+/// Distributes new epoch key to all members.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupKeyRotationPayload {
+    /// Group ID.
+    pub group_id: [u8; 32],
+    /// New epoch number.
+    pub new_epoch_number: u64,
+    /// Encrypted key shares (one per member).
+    pub new_epoch_key_encrypted: Vec<EncryptedKeyShare>,
+    /// Admin's signature.
+    #[serde(with = "serde_signature")]
+    pub rotation_signature: [u8; 64],
+}
+
+impl GroupKeyRotationPayload {
+    /// Serialize to bytes.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        bincode::serialize(self).map_err(|e| Error::Encoding(e.to_string()))
+    }
+
+    /// Deserialize from bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        bincode::deserialize(bytes).map_err(|e| Error::Encoding(e.to_string()))
+    }
+}
+
+/// GROUP_ADMIN_HANDOVER packet payload.
+///
+/// Transfers founder/admin rights to another member.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupAdminHandoverPayload {
+    /// Group ID.
+    pub group_id: [u8; 32],
+    /// New admin's member ID.
+    pub new_admin_id: [u8; 16],
+    /// New admin's public key.
+    pub new_admin_pubkey: [u8; 32],
+    /// Current admin's signature.
+    #[serde(with = "serde_signature")]
+    pub handover_signature: [u8; 64],
+    /// Timestamp.
+    pub timestamp: i64,
+}
+
+impl GroupAdminHandoverPayload {
+    /// Serialize to bytes.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        bincode::serialize(self).map_err(|e| Error::Encoding(e.to_string()))
+    }
+
+    /// Deserialize from bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        bincode::deserialize(bytes).map_err(|e| Error::Encoding(e.to_string()))
+    }
+}
+
+/// GROUP_MEMBER_LEAVE packet payload.
+///
+/// Member voluntarily leaves the group.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupMemberLeavePayload {
+    /// Group ID.
+    pub group_id: [u8; 32],
+    /// Leaving member's ID.
+    pub member_id: [u8; 16],
+    /// Member's signature.
+    #[serde(with = "serde_signature")]
+    pub member_signature: [u8; 64],
+    /// Timestamp.
+    pub timestamp: i64,
+}
+
+impl GroupMemberLeavePayload {
+    /// Serialize to bytes.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        bincode::serialize(self).map_err(|e| Error::Encoding(e.to_string()))
+    }
+
+    /// Deserialize from bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        bincode::deserialize(bytes).map_err(|e| Error::Encoding(e.to_string()))
+    }
+}
+
+/// GROUP_NEIGHBOR_REQUEST packet payload.
+///
+/// Request new neighbors in blind membership mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupNeighborRequestPayload {
+    /// Group ID.
+    pub group_id: [u8; 32],
+    /// Requester's member ID.
+    pub requester_id: [u8; 16],
+    /// Number of neighbors requested.
+    pub requested_count: u8,
+    /// Requester's signature.
+    #[serde(with = "serde_signature")]
+    pub signature: [u8; 64],
+}
+
+impl GroupNeighborRequestPayload {
+    /// Serialize to bytes.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        bincode::serialize(self).map_err(|e| Error::Encoding(e.to_string()))
+    }
+
+    /// Deserialize from bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        bincode::deserialize(bytes).map_err(|e| Error::Encoding(e.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,6 +791,16 @@ mod tests {
             PacketType::CallSignal,
             PacketType::FileChunk,
             PacketType::FileOffer,
+            PacketType::GroupCreate,
+            PacketType::GroupInvite,
+            PacketType::GroupJoinRequest,
+            PacketType::GroupJoinAccept,
+            PacketType::GroupMessage,
+            PacketType::GroupMemberSync,
+            PacketType::GroupKeyRotation,
+            PacketType::GroupAdminHandover,
+            PacketType::GroupMemberLeave,
+            PacketType::GroupNeighborRequest,
         ] {
             let byte = pt.to_byte();
             let parsed = PacketType::from_byte(byte).expect("should parse");

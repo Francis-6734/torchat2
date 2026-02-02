@@ -25,6 +25,7 @@ mod aead;
 mod keys;
 mod ratchet;
 mod rotation;
+pub mod group_crypto;
 
 pub use aead::{
     decrypt, decrypt_with_prepended_nonce, encrypt, encrypt_with_random_nonce, Nonce, NONCE_SIZE,
@@ -36,6 +37,12 @@ pub use keys::{
 };
 pub use ratchet::{DoubleRatchet, MessageKeys, RatchetHeader, RatchetState};
 pub use rotation::{KeyRotationManager, RotationConfig, VersionedKey};
+pub use group_crypto::{
+    decrypt_epoch_key_from_sender, decrypt_group_message, derive_epoch_key,
+    encrypt_epoch_key_for_member, encrypt_group_message, generate_group_id,
+    generate_initial_group_key, generate_invite_id, generate_member_id, generate_message_id,
+    generate_random_nonce, sign_invite_token, verify_invite_token,
+};
 
 use crate::error::{Error, Result};
 use hkdf::Hkdf;

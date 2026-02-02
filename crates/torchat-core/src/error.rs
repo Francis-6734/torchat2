@@ -61,6 +61,14 @@ pub enum Error {
     /// Resource not found.
     #[error("not found")]
     NotFound(String),
+
+    /// Permission denied.
+    #[error("permission denied")]
+    Permission(String),
+
+    /// Invalid state for operation.
+    #[error("invalid state")]
+    State(String),
 }
 
 /// Result type alias using TorChat's Error.

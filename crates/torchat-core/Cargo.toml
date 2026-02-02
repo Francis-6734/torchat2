@@ -49,6 +49,9 @@ audiopus = { workspace = true, optional = true }
 # System info
 hostname.workspace = true
 
+# Data structures
+lru.workspace = true
+
 [dev-dependencies]
 anyhow.workspace = true
 tokio = { workspace = true, features = ["test-util", "macros"] }

@@ -18,6 +18,9 @@ mod message;
 mod relay;
 mod session;
 pub mod stream_transfer;
+pub mod group_mesh;
+pub mod group_gossip;
+pub mod group_session;
 
 pub use daemon::{DaemonCommand, DaemonEvent, MessagingDaemon};
 pub use file_transfer::{
@@ -33,6 +36,9 @@ pub use relay::{
     ConnectionState, DeliveryStatus, QueuedMessage, RelayConfig, RelayEvent, RelayHandler,
 };
 pub use session::{Session, SessionId, SessionState};
+pub use group_mesh::{MeshTopology, BlindMembershipManager, NeighborInfo};
+pub use group_gossip::{GossipManager, ReceivedGroupMessage};
+pub use group_session::{GroupSession, GroupState, GroupMessage};
 
 use rand::RngCore;
 

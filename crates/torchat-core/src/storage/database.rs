@@ -4,6 +4,8 @@ use super::schema::{CREATE_SCHEMA, SCHEMA_VERSION};
 use crate::error::{Error, Result};
 use crate::identity::TorIdentity;
 use crate::messaging::{Message, MessageContent, MessageId, MessageStatus};
+use crate::messaging::{GroupSession, GroupState, GroupMessage};
+use crate::protocol::{GroupMember, GroupPolicy, GroupInvitePayload};
 use rusqlite::{params, Connection, OpenFlags};
 use serde::Serialize;
 use std::path::Path;
@@ -322,6 +324,452 @@ impl Database {
 
         match result {
             Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(Error::Storage(e.to_string())),
+        }
+    }
+
+    // ========================================================================
+    // Group Chat Methods
+    // ========================================================================
+
+    /// Store a group session.
+    pub fn store_group(&self, session: &GroupSession) -> Result<i64> {
+        let now = chrono::Utc::now().timestamp();
+
+        // Serialize policy
+        let policy_blob = bincode::serialize(&session.policy)
+            .map_err(|e| Error::Storage(format!("failed to serialize policy: {}", e)))?;
+
+        let state_str = match session.state {
+            GroupState::Active => "active",
+            GroupState::Archived => "archived",
+        };
+
+        self.conn
+            .execute(
+                r#"
+                INSERT OR REPLACE INTO groups
+                (group_id, group_name, founder_pubkey, our_member_id, current_epoch_number,
+                 current_epoch_key, epoch_key_updated_at, policy_blob, state, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                "#,
+                params![
+                    session.id.as_slice(),
+                    &session.name,
+                    session.founder_pubkey.as_slice(),
+                    session.our_member_id.as_slice(),
+                    session.current_epoch_number as i64,
+                    vec![0u8; 32], // Placeholder - epoch key not stored for security
+                    now,
+                    policy_blob,
+                    state_str,
+                    now,
+                    now,
+                ],
+            )
+            .map_err(|e| Error::Storage(format!("failed to store group: {}", e)))?;
+
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Load a group session by group ID.
+    /// Note: Returns None because epoch keys and session state cannot be fully restored from DB.
+    /// Groups should be maintained in memory and only metadata persisted.
+    pub fn load_group_metadata(&self, group_id: &[u8; 32]) -> Result<Option<(String, [u8; 32], [u8; 16], u64, GroupPolicy, GroupState)>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                r#"
+                SELECT group_name, founder_pubkey, our_member_id, current_epoch_number, policy_blob, state
+                FROM groups WHERE group_id = ?
+                "#
+            )
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let result = stmt.query_row(params![group_id.as_slice()], |row| {
+            let name: String = row.get(0)?;
+            let founder_bytes: Vec<u8> = row.get(1)?;
+            let member_bytes: Vec<u8> = row.get(2)?;
+            let epoch: i64 = row.get(3)?;
+            let policy_blob: Vec<u8> = row.get(4)?;
+            let state_str: String = row.get(5)?;
+
+            let mut founder_pubkey = [0u8; 32];
+            founder_pubkey.copy_from_slice(&founder_bytes);
+
+            let mut our_member_id = [0u8; 16];
+            our_member_id.copy_from_slice(&member_bytes);
+
+            Ok((name, founder_pubkey, our_member_id, epoch as u64, policy_blob, state_str))
+        });
+
+        match result {
+            Ok((name, founder_pubkey, our_member_id, epoch, policy_blob, state_str)) => {
+                let policy: GroupPolicy = bincode::deserialize(&policy_blob)
+                    .map_err(|e| Error::Storage(format!("failed to deserialize policy: {}", e)))?;
+
+                let state = match state_str.as_str() {
+                    "active" => GroupState::Active,
+                    "archived" => GroupState::Archived,
+                    _ => GroupState::Archived,
+                };
+
+                Ok(Some((name, founder_pubkey, our_member_id, epoch, policy, state)))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(Error::Storage(e.to_string())),
+        }
+    }
+
+    /// List all groups.
+    pub fn list_groups(&self) -> Result<Vec<([u8; 32], String, GroupState)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT group_id, group_name, state FROM groups ORDER BY group_name")
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let id_bytes: Vec<u8> = row.get(0)?;
+                let name: String = row.get(1)?;
+                let state_str: String = row.get(2)?;
+                Ok((id_bytes, name, state_str))
+            })
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let mut groups = Vec::new();
+        for row in rows {
+            let (id_bytes, name, state_str) = row.map_err(|e| Error::Storage(e.to_string()))?;
+            let mut group_id = [0u8; 32];
+            group_id.copy_from_slice(&id_bytes);
+
+            let state = match state_str.as_str() {
+                "active" => GroupState::Active,
+                "archived" => GroupState::Archived,
+                _ => GroupState::Archived,
+            };
+
+            groups.push((group_id, name, state));
+        }
+
+        Ok(groups)
+    }
+
+    /// Store a group member.
+    pub fn store_group_member(&self, group_id: &[u8; 32], member: &GroupMember) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+
+        self.conn
+            .execute(
+                r#"
+                INSERT OR REPLACE INTO group_members
+                (group_id, member_id, onion_address, pubkey, is_admin, is_neighbor, joined_at, last_seen, updated_at)
+                VALUES (
+                    (SELECT id FROM groups WHERE group_id = ?),
+                    ?, ?, ?, ?, 0, ?, ?, ?
+                )
+                "#,
+                params![
+                    group_id.as_slice(),
+                    member.member_id.as_slice(),
+                    member.onion_address.as_ref(),
+                    member.pubkey.as_slice(),
+                    member.is_admin as i32,
+                    member.joined_at,
+                    now,
+                    now,
+                ],
+            )
+            .map_err(|e| Error::Storage(format!("failed to store group member: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Load all members for a group.
+    pub fn load_group_members(&self, group_id: &[u8; 32]) -> Result<Vec<GroupMember>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                r#"
+                SELECT member_id, onion_address, pubkey, is_admin, joined_at
+                FROM group_members
+                WHERE group_id = (SELECT id FROM groups WHERE group_id = ?)
+                ORDER BY joined_at
+                "#
+            )
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(params![group_id.as_slice()], |row| {
+                let member_id_bytes: Vec<u8> = row.get(0)?;
+                let onion_address: Option<String> = row.get(1)?;
+                let pubkey_bytes: Vec<u8> = row.get(2)?;
+                let is_admin: i32 = row.get(3)?;
+                let joined_at: i64 = row.get(4)?;
+                Ok((member_id_bytes, onion_address, pubkey_bytes, is_admin, joined_at))
+            })
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let mut members = Vec::new();
+        for row in rows {
+            let (member_id_bytes, onion_address, pubkey_bytes, is_admin, joined_at) =
+                row.map_err(|e| Error::Storage(e.to_string()))?;
+
+            let mut member_id = [0u8; 16];
+            member_id.copy_from_slice(&member_id_bytes);
+
+            let mut pubkey = [0u8; 32];
+            pubkey.copy_from_slice(&pubkey_bytes);
+
+            members.push(GroupMember {
+                member_id,
+                onion_address,
+                pubkey,
+                is_admin: is_admin != 0,
+                joined_at,
+            });
+        }
+
+        Ok(members)
+    }
+
+    /// Store a group message.
+    pub fn store_group_message(&self, group_id: &[u8; 32], message: &GroupMessage) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+
+        self.conn
+            .execute(
+                r#"
+                INSERT OR REPLACE INTO group_messages
+                (group_db_id, msg_id, sender_anon_id, epoch_number, content, timestamp, received_at, hop_count, is_delivered)
+                VALUES (
+                    (SELECT id FROM groups WHERE group_id = ?),
+                    ?, ?, 0, ?, ?, ?, 0, 1
+                )
+                "#,
+                params![
+                    group_id.as_slice(),
+                    message.id.as_slice(),
+                    message.sender_id.as_slice(),
+                    &message.content,
+                    message.timestamp,
+                    now,
+                ],
+            )
+            .map_err(|e| Error::Storage(format!("failed to store group message: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Load recent messages for a group.
+    pub fn load_group_messages(&self, group_id: &[u8; 32], limit: u32) -> Result<Vec<GroupMessage>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                r#"
+                SELECT msg_id, sender_anon_id, content, timestamp
+                FROM group_messages
+                WHERE group_db_id = (SELECT id FROM groups WHERE group_id = ?)
+                ORDER BY timestamp DESC
+                LIMIT ?
+                "#
+            )
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(params![group_id.as_slice(), limit], |row| {
+                let msg_id_bytes: Vec<u8> = row.get(0)?;
+                let sender_id_bytes: Vec<u8> = row.get(1)?;
+                let content_blob: Vec<u8> = row.get(2)?;
+                let timestamp: i64 = row.get(3)?;
+                Ok((msg_id_bytes, sender_id_bytes, content_blob, timestamp))
+            })
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let mut messages = Vec::new();
+        for row in rows {
+            let (msg_id_bytes, sender_id_bytes, content_blob, timestamp) =
+                row.map_err(|e| Error::Storage(e.to_string()))?;
+
+            let mut msg_id = [0u8; 32];
+            msg_id.copy_from_slice(&msg_id_bytes);
+
+            let mut sender_id = [0u8; 16];
+            sender_id.copy_from_slice(&sender_id_bytes);
+
+            // Content is stored as BLOB, convert to String
+            let content = String::from_utf8_lossy(&content_blob).to_string();
+
+            messages.push(GroupMessage {
+                id: msg_id,
+                sender_id,
+                content,
+                timestamp,
+                outgoing: false, // Will be determined by comparing sender_id with our member_id
+            });
+        }
+
+        // Reverse to get chronological order
+        messages.reverse();
+        Ok(messages)
+    }
+
+    /// Mark a group message as seen (for gossip deduplication).
+    pub fn mark_message_seen(&self, group_id: &[u8; 32], msg_id: &[u8; 32]) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+
+        self.conn
+            .execute(
+                r#"
+                INSERT OR IGNORE INTO group_gossip_seen (group_id, msg_id, seen_at)
+                VALUES ((SELECT id FROM groups WHERE group_id = ?), ?, ?)
+                "#,
+                params![group_id.as_slice(), msg_id.as_slice(), now],
+            )
+            .map_err(|e| Error::Storage(format!("failed to mark message seen: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Check if a message has been seen (for gossip deduplication).
+    pub fn is_message_seen(&self, group_id: &[u8; 32], msg_id: &[u8; 32]) -> Result<bool> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                r#"
+                SELECT 1 FROM group_gossip_seen
+                WHERE group_id = (SELECT id FROM groups WHERE group_id = ?)
+                AND msg_id = ?
+                "#
+            )
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let result = stmt.query_row(params![group_id.as_slice(), msg_id.as_slice()], |_| Ok(()));
+
+        match result {
+            Ok(_) => Ok(true),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(e) => Err(Error::Storage(e.to_string())),
+        }
+    }
+
+    /// Store a group invite.
+    pub fn store_invite(
+        &self,
+        group_id: &[u8; 32],
+        invite_id: &[u8; 32],
+        invitee_onion: Option<&str>,
+        issued_by: &[u8; 16],
+        expires_at: i64,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+
+        self.conn
+            .execute(
+                r#"
+                INSERT INTO group_invites
+                (group_id, invite_id, invitee_onion, issued_by, expires_at, revoked, created_at)
+                VALUES ((SELECT id FROM groups WHERE group_id = ?), ?, ?, ?, ?, 0, ?)
+                "#,
+                params![
+                    group_id.as_slice(),
+                    invite_id.as_slice(),
+                    invitee_onion,
+                    issued_by.as_slice(),
+                    expires_at,
+                    now,
+                ],
+            )
+            .map_err(|e| Error::Storage(format!("failed to store invite: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Revoke a group invite.
+    pub fn revoke_invite(&self, invite_id: &[u8; 32]) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE group_invites SET revoked = 1 WHERE invite_id = ?",
+                params![invite_id.as_slice()],
+            )
+            .map_err(|e| Error::Storage(format!("failed to revoke invite: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Check if an invite is valid (exists, not revoked, not expired).
+    pub fn is_invite_valid(&self, invite_id: &[u8; 32]) -> Result<bool> {
+        let now = chrono::Utc::now().timestamp();
+
+        let mut stmt = self
+            .conn
+            .prepare(
+                r#"
+                SELECT 1 FROM group_invites
+                WHERE invite_id = ? AND revoked = 0 AND expires_at > ?
+                "#
+            )
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let result = stmt.query_row(params![invite_id.as_slice(), now], |_| Ok(()));
+
+        match result {
+            Ok(_) => Ok(true),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(e) => Err(Error::Storage(e.to_string())),
+        }
+    }
+
+    /// Store an epoch key (for key rotation history).
+    pub fn store_epoch_key(
+        &self,
+        group_id: &[u8; 32],
+        epoch_number: u64,
+        _epoch_key: &[u8; 32], // Not stored for security
+    ) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+
+        self.conn
+            .execute(
+                r#"
+                INSERT OR REPLACE INTO group_epoch_keys
+                (group_id, epoch_number, epoch_key, created_at)
+                VALUES ((SELECT id FROM groups WHERE group_id = ?), ?, ?, ?)
+                "#,
+                params![
+                    group_id.as_slice(),
+                    epoch_number as i64,
+                    vec![0u8; 32], // Placeholder - not stored for security
+                    now,
+                ],
+            )
+            .map_err(|e| Error::Storage(format!("failed to store epoch key: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Get the latest epoch number for a group.
+    pub fn get_latest_epoch_number(&self, group_id: &[u8; 32]) -> Result<Option<u64>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                r#"
+                SELECT epoch_number FROM group_epoch_keys
+                WHERE group_id = (SELECT id FROM groups WHERE group_id = ?)
+                ORDER BY epoch_number DESC
+                LIMIT 1
+                "#
+            )
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let result = stmt.query_row(params![group_id.as_slice()], |row| {
+            let epoch: i64 = row.get(0)?;
+            Ok(epoch as u64)
+        });
+
+        match result {
+            Ok(epoch) => Ok(Some(epoch)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(Error::Storage(e.to_string())),
         }

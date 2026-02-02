@@ -218,8 +218,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Build router with security middleware
     let app = Router::new()
-        // Static files
-        .nest_service("/static", ServeDir::new("public"))
+        // Static files (relative to crate root)
+        .nest_service("/static", ServeDir::new("crates/torchat-web/public"))
 
         // Merge file upload routes with large body limit
         .merge(file_upload_routes)
@@ -251,6 +251,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/users", get(api::list_users))
         // Diagnostic - test connectivity
         .route("/api/diagnostic/connectivity", post(api::test_connectivity))
+        // Group chat
+        .route("/api/groups", get(api::list_groups).post(api::create_group))
+        .route("/api/groups/join", post(api::join_group))
+        .route("/api/groups/:group_id/invite", post(api::send_group_invite))
+        .route("/api/groups/:group_id/messages", get(api::get_group_messages).post(api::send_group_message))
+        .route("/api/groups/:group_id/leave", post(api::leave_group))
 
         // Apply default body limit for other routes
         .layer(RequestBodyLimitLayer::new(DEFAULT_BODY_LIMIT))

@@ -14,6 +14,7 @@ use axum_extra::extract::Multipart;
 use serde::Serialize;
 use std::sync::Arc;
 use tracing::{info, warn};
+use base64::Engine;
 
 use crate::models::*;
 use torchat_core::identity::{generate_identity, TorIdentity};
@@ -37,6 +38,12 @@ fn generate_session_token() -> String {
 
 /// Extract session token from request headers (cookies)
 fn extract_session_token(headers: &HeaderMap) -> Option<String> {
+    // First try X-Session-Token header
+    if let Some(token) = headers.get("x-session-token").and_then(|v| v.to_str().ok()) {
+        return Some(token.to_string());
+    }
+
+    // Fallback to cookie
     headers
         .get("cookie")
         .and_then(|v| v.to_str().ok())
@@ -1833,4 +1840,656 @@ pub async fn test_connectivity(
             )
         }
     }
+}
+
+// ========================================
+// Group Chat API Endpoints
+// ========================================
+
+/// Create a new group
+pub async fn create_group(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<CreateGroupRequest>,
+) -> (StatusCode, Json<ApiResponse<GroupInfo>>) {
+    let session_token = match extract_session_token(&headers) {
+        Some(token) => token,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("No session token".to_string()),
+                }),
+            );
+        }
+    };
+
+    let db = state.database.lock().await;
+    let (user_id, identity, _display_name) = match db.get_user_by_session(&session_token) {
+        Ok(Some(user)) => user,
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid session".to_string()),
+                }),
+            );
+        }
+    };
+    drop(db);
+
+    let daemons = state.daemons.lock().await;
+    let daemon = match daemons.get(&user_id) {
+        Some(d) => d.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Daemon not running".to_string()),
+                }),
+            );
+        }
+    };
+    drop(daemons);
+
+    let policy = torchat_core::protocol::GroupPolicy {
+        blind_membership: request.blind_membership.unwrap_or(false),
+        max_size: request.max_size.unwrap_or(50),
+        allow_member_invite: false,
+        key_rotation_interval: 86400,
+        address_rotation_enabled: false,
+    };
+
+    use torchat_core::messaging::DaemonCommand;
+    if let Err(e) = daemon.command_sender().send(DaemonCommand::CreateGroup {
+        name: request.name.clone(),
+        policy: policy.clone(),
+    }).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Failed to create group: {}", e)),
+            }),
+        );
+    }
+
+    let group_id_bytes = torchat_core::crypto::generate_group_id(
+        &request.name,
+        &identity.public_key().to_bytes(),
+    );
+
+    info!(name = %request.name, user_id, "Created group");
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse::ok(GroupInfo {
+            group_id: hex::encode(group_id_bytes),
+            name: request.name,
+            member_count: 1,
+            state: "Active".to_string(),
+            is_founder: true,
+        })),
+    )
+}
+
+/// Send group invite
+pub async fn send_group_invite(
+    headers: HeaderMap,
+    Path(group_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<SendInviteRequest>,
+) -> (StatusCode, Json<ApiResponse<String>>) {
+    let session_token = match extract_session_token(&headers) {
+        Some(token) => token,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("No session token".to_string()),
+                }),
+            );
+        }
+    };
+
+    let db = state.database.lock().await;
+    let (user_id, _identity, _display_name) = match db.get_user_by_session(&session_token) {
+        Ok(Some(user)) => user,
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid session".to_string()),
+                }),
+            );
+        }
+    };
+    drop(db);
+
+    if let Err(e) = validate_onion_address(&request.invitee_onion) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Invalid onion address: {}", e)),
+            }),
+        );
+    }
+
+    let group_id_bytes = match hex::decode(&group_id) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid group ID format".to_string()),
+                }),
+            );
+        }
+    };
+
+    let daemons = state.daemons.lock().await;
+    let daemon = match daemons.get(&user_id) {
+        Some(d) => d.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Daemon not running".to_string()),
+                }),
+            );
+        }
+    };
+    drop(daemons);
+
+    use torchat_core::messaging::DaemonCommand;
+    if let Err(e) = daemon.command_sender().send(DaemonCommand::GenerateGroupInvite {
+        group_id: group_id_bytes,
+        expires_at: chrono::Utc::now().timestamp() + 86400, // 24 hours
+    }).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Failed to send invite: {}", e)),
+            }),
+        );
+    }
+
+    info!(group_id, invitee = %request.invitee_onion, "Sent group invite");
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse::ok("Invite sent successfully".to_string())),
+    )
+}
+
+/// Join a group via invite
+pub async fn join_group(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<JoinGroupRequest>,
+) -> (StatusCode, Json<ApiResponse<GroupInfo>>) {
+    let session_token = match extract_session_token(&headers) {
+        Some(token) => token,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("No session token".to_string()),
+                }),
+            );
+        }
+    };
+
+    let db = state.database.lock().await;
+    let (user_id, _identity, _display_name) = match db.get_user_by_session(&session_token) {
+        Ok(Some(user)) => user,
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid session".to_string()),
+                }),
+            );
+        }
+    };
+    drop(db);
+
+    let invite_bytes = match base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        &request.invite_token,
+    ) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some(format!("Invalid invite token: {}", e)),
+                }),
+            );
+        }
+    };
+
+    let invite: torchat_core::protocol::GroupInvitePayload = match bincode::deserialize(&invite_bytes) {
+        Ok(inv) => inv,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some(format!("Invalid invite format: {}", e)),
+                }),
+            );
+        }
+    };
+
+    let daemons = state.daemons.lock().await;
+    let daemon = match daemons.get(&user_id) {
+        Some(d) => d.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Daemon not running".to_string()),
+                }),
+            );
+        }
+    };
+    drop(daemons);
+
+    use torchat_core::messaging::DaemonCommand;
+    if let Err(e) = daemon.command_sender().send(DaemonCommand::JoinGroup {
+        invite: invite.clone(),
+    }).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Failed to join group: {}", e)),
+            }),
+        );
+    }
+
+    info!(group_id = ?invite.group_id, "Joined group");
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse::ok(GroupInfo {
+            group_id: hex::encode(invite.group_id),
+            name: "Group".to_string(),
+            member_count: 0,
+            state: "Active".to_string(),
+            is_founder: false,
+        })),
+    )
+}
+
+/// List user's groups
+pub async fn list_groups(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<ApiResponse<Vec<GroupInfo>>>) {
+    let session_token = match extract_session_token(&headers) {
+        Some(token) => token,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("No session token".to_string()),
+                }),
+            );
+        }
+    };
+
+    let db = state.database.lock().await;
+    let (user_id, _identity, _display_name) = match db.get_user_by_session(&session_token) {
+        Ok(Some(user)) => user,
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid session".to_string()),
+                }),
+            );
+        }
+    };
+
+    let groups = match db.list_groups() {
+        Ok(groups) => groups,
+        Err(e) => {
+            warn!(user_id, error = %e, "Failed to list groups");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Failed to list groups".to_string()),
+                }),
+            );
+        }
+    };
+
+    let group_infos: Vec<GroupInfo> = groups
+        .into_iter()
+        .map(|(group_id, name, state)| {
+            let state_str = match state {
+                torchat_core::messaging::GroupState::Active => "Active",
+                torchat_core::messaging::GroupState::Archived => "Archived",
+            };
+
+            GroupInfo {
+                group_id: hex::encode(group_id),
+                name,
+                member_count: 0,
+                state: state_str.to_string(),
+                is_founder: false,
+            }
+        })
+        .collect();
+
+    (StatusCode::OK, Json(ApiResponse::ok(group_infos)))
+}
+
+/// Send message to group
+pub async fn send_group_message(
+    headers: HeaderMap,
+    Path(group_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<SendGroupMessageRequest>,
+) -> (StatusCode, Json<ApiResponse<String>>) {
+    let session_token = match extract_session_token(&headers) {
+        Some(token) => token,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("No session token".to_string()),
+                }),
+            );
+        }
+    };
+
+    let db = state.database.lock().await;
+    let (user_id, _identity, _display_name) = match db.get_user_by_session(&session_token) {
+        Ok(Some(user)) => user,
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid session".to_string()),
+                }),
+            );
+        }
+    };
+    drop(db);
+
+    let group_id_bytes = match hex::decode(&group_id) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid group ID format".to_string()),
+                }),
+            );
+        }
+    };
+
+    let daemons = state.daemons.lock().await;
+    let daemon = match daemons.get(&user_id) {
+        Some(d) => d.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Daemon not running".to_string()),
+                }),
+            );
+        }
+    };
+    drop(daemons);
+
+    use torchat_core::messaging::DaemonCommand;
+    if let Err(e) = daemon.command_sender().send(DaemonCommand::SendGroupMessage {
+        group_id: group_id_bytes,
+        content: request.content.clone(),
+    }).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Failed to send message: {}", e)),
+            }),
+        );
+    }
+
+    info!(group_id, user_id, "Sent group message");
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse::ok("Message sent".to_string())),
+    )
+}
+
+/// Get group messages
+pub async fn get_group_messages(
+    headers: HeaderMap,
+    Path(group_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<ApiResponse<Vec<GroupMessageInfo>>>) {
+    let session_token = match extract_session_token(&headers) {
+        Some(token) => token,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("No session token".to_string()),
+                }),
+            );
+        }
+    };
+
+    let db = state.database.lock().await;
+    let (user_id, _identity, _display_name) = match db.get_user_by_session(&session_token) {
+        Ok(Some(user)) => user,
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid session".to_string()),
+                }),
+            );
+        }
+    };
+
+    let group_id_bytes = match hex::decode(&group_id) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid group ID format".to_string()),
+                }),
+            );
+        }
+    };
+
+    let messages = match db.load_group_messages(&group_id_bytes, 100) {
+        Ok(msgs) => msgs,
+        Err(e) => {
+            warn!(user_id, group_id, error = %e, "Failed to load group messages");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Failed to load messages".to_string()),
+                }),
+            );
+        }
+    };
+
+    let message_infos: Vec<GroupMessageInfo> = messages
+        .into_iter()
+        .map(|msg| GroupMessageInfo {
+            message_id: hex::encode(msg.id),
+            sender_id: hex::encode(msg.sender_id),
+            content: msg.content,
+            timestamp: msg.timestamp,
+            outgoing: msg.outgoing,
+        })
+        .collect();
+
+    (StatusCode::OK, Json(ApiResponse::ok(message_infos)))
+}
+
+/// Leave a group
+pub async fn leave_group(
+    headers: HeaderMap,
+    Path(group_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<ApiResponse<String>>) {
+    let session_token = match extract_session_token(&headers) {
+        Some(token) => token,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("No session token".to_string()),
+                }),
+            );
+        }
+    };
+
+    let db = state.database.lock().await;
+    let (user_id, _identity, _display_name) = match db.get_user_by_session(&session_token) {
+        Ok(Some(user)) => user,
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid session".to_string()),
+                }),
+            );
+        }
+    };
+    drop(db);
+
+    let group_id_bytes = match hex::decode(&group_id) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid group ID format".to_string()),
+                }),
+            );
+        }
+    };
+
+    let daemons = state.daemons.lock().await;
+    let daemon = match daemons.get(&user_id) {
+        Some(d) => d.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Daemon not running".to_string()),
+                }),
+            );
+        }
+    };
+    drop(daemons);
+
+    use torchat_core::messaging::DaemonCommand;
+    if let Err(e) = daemon.command_sender().send(DaemonCommand::LeaveGroup {
+        group_id: group_id_bytes,
+    }).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Failed to leave group: {}", e)),
+            }),
+        );
+    }
+
+    info!(group_id, user_id, "Left group");
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse::ok("Left group successfully".to_string())),
+    )
 }

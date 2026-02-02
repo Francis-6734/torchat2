@@ -154,6 +154,8 @@ impl fmt::Debug for OnionAddress {
 pub struct TorIdentity {
     #[zeroize(skip)] // SigningKey has its own zeroization
     signing_key: SigningKey,
+    /// X25519 secret key for ECDH (used for group epoch key encryption).
+    x25519_secret: x25519_dalek::StaticSecret,
     #[zeroize(skip)]
     onion_address: OnionAddress,
     #[zeroize(skip)]
@@ -167,8 +169,12 @@ impl TorIdentity {
         let onion_address = OnionAddress::from_public_key(&verifying_key);
         let fingerprint = super::compute_fingerprint(&verifying_key);
 
+        // Generate X25519 keypair for ECDH (used in group epoch key encryption)
+        let x25519_secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+
         Ok(Self {
             signing_key,
+            x25519_secret,
             onion_address,
             fingerprint,
         })
@@ -239,6 +245,16 @@ impl TorIdentity {
     pub(crate) fn signing_key(&self) -> &SigningKey {
         &self.signing_key
     }
+
+    /// Get X25519 public key for ECDH.
+    pub fn x25519_public_key(&self) -> x25519_dalek::PublicKey {
+        x25519_dalek::PublicKey::from(&self.x25519_secret)
+    }
+
+    /// Get X25519 secret key bytes for epoch key decryption.
+    pub fn x25519_secret_bytes(&self) -> [u8; 32] {
+        self.x25519_secret.to_bytes()
+    }
 }
 
 impl fmt::Debug for TorIdentity {
@@ -255,8 +271,10 @@ impl Clone for TorIdentity {
     fn clone(&self) -> Self {
         // Clone by recreating from secret key bytes
         let signing_key = SigningKey::from_bytes(&self.signing_key.to_bytes());
+        let x25519_secret = x25519_dalek::StaticSecret::from(self.x25519_secret.to_bytes());
         Self {
             signing_key,
+            x25519_secret,
             onion_address: self.onion_address.clone(),
             fingerprint: self.fingerprint.clone(),
         }

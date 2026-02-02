@@ -117,6 +117,61 @@ pub struct VoiceCallInfo {
     pub duration: Option<u64>,
 }
 
+/// Group chat information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupInfo {
+    pub group_id: String,
+    pub name: String,
+    pub member_count: usize,
+    pub state: String,
+    pub is_founder: bool,
+}
+
+/// Group member information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupMemberInfo {
+    pub member_id: String,
+    pub onion_address: Option<String>,
+    pub is_admin: bool,
+    pub joined_at: i64,
+}
+
+/// Group message
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupMessageInfo {
+    pub message_id: String,
+    pub sender_id: String,
+    pub content: String,
+    pub timestamp: i64,
+    pub outgoing: bool,
+}
+
+/// Create group request
+#[derive(Debug, Deserialize)]
+pub struct CreateGroupRequest {
+    pub name: String,
+    pub blind_membership: Option<bool>,
+    pub max_size: Option<u32>,
+}
+
+/// Send invite request
+#[derive(Debug, Deserialize)]
+pub struct SendInviteRequest {
+    pub invitee_onion: String,
+}
+
+/// Join group request
+#[derive(Debug, Deserialize)]
+pub struct JoinGroupRequest {
+    pub invite_token: String, // Base64-encoded invite payload
+}
+
+/// Send group message request
+#[derive(Debug, Deserialize)]
+pub struct SendGroupMessageRequest {
+    pub content: String,
+}
+
 /// API response
 #[derive(Debug, Serialize)]
 pub struct ApiResponse<T: Serialize> {
