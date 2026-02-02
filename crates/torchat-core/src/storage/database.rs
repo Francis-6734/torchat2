@@ -360,7 +360,7 @@ impl Database {
                     session.founder_pubkey.as_slice(),
                     session.our_member_id.as_slice(),
                     session.current_epoch_number as i64,
-                    vec![0u8; 32], // Placeholder - epoch key not stored for security
+                    session.current_epoch_key().as_slice(),
                     now,
                     policy_blob,
                     state_str,
@@ -374,14 +374,13 @@ impl Database {
     }
 
     /// Load a group session by group ID.
-    /// Note: Returns None because epoch keys and session state cannot be fully restored from DB.
-    /// Groups should be maintained in memory and only metadata persisted.
-    pub fn load_group_metadata(&self, group_id: &[u8; 32]) -> Result<Option<(String, [u8; 32], [u8; 16], u64, GroupPolicy, GroupState)>> {
+    /// Returns group metadata including epoch key for session restoration.
+    pub fn load_group_metadata(&self, group_id: &[u8; 32]) -> Result<Option<(String, [u8; 32], [u8; 16], u64, [u8; 32], GroupPolicy, GroupState)>> {
         let mut stmt = self
             .conn
             .prepare(
                 r#"
-                SELECT group_name, founder_pubkey, our_member_id, current_epoch_number, policy_blob, state
+                SELECT group_name, founder_pubkey, our_member_id, current_epoch_number, current_epoch_key, policy_blob, state
                 FROM groups WHERE group_id = ?
                 "#
             )
@@ -392,8 +391,9 @@ impl Database {
             let founder_bytes: Vec<u8> = row.get(1)?;
             let member_bytes: Vec<u8> = row.get(2)?;
             let epoch: i64 = row.get(3)?;
-            let policy_blob: Vec<u8> = row.get(4)?;
-            let state_str: String = row.get(5)?;
+            let epoch_key_bytes: Vec<u8> = row.get(4)?;
+            let policy_blob: Vec<u8> = row.get(5)?;
+            let state_str: String = row.get(6)?;
 
             let mut founder_pubkey = [0u8; 32];
             founder_pubkey.copy_from_slice(&founder_bytes);
@@ -401,11 +401,16 @@ impl Database {
             let mut our_member_id = [0u8; 16];
             our_member_id.copy_from_slice(&member_bytes);
 
-            Ok((name, founder_pubkey, our_member_id, epoch as u64, policy_blob, state_str))
+            let mut epoch_key = [0u8; 32];
+            if epoch_key_bytes.len() == 32 {
+                epoch_key.copy_from_slice(&epoch_key_bytes);
+            }
+
+            Ok((name, founder_pubkey, our_member_id, epoch as u64, epoch_key, policy_blob, state_str))
         });
 
         match result {
-            Ok((name, founder_pubkey, our_member_id, epoch, policy_blob, state_str)) => {
+            Ok((name, founder_pubkey, our_member_id, epoch, epoch_key, policy_blob, state_str)) => {
                 let policy: GroupPolicy = bincode::deserialize(&policy_blob)
                     .map_err(|e| Error::Storage(format!("failed to deserialize policy: {}", e)))?;
 
@@ -415,7 +420,7 @@ impl Database {
                     _ => GroupState::Archived,
                 };
 
-                Ok(Some((name, founder_pubkey, our_member_id, epoch, policy, state)))
+                Ok(Some((name, founder_pubkey, our_member_id, epoch, epoch_key, policy, state)))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(Error::Storage(e.to_string())),

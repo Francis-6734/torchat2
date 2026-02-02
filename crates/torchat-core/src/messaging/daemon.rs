@@ -570,6 +570,57 @@ impl MessagingDaemon {
             *running = true;
         }
 
+        // Load existing groups from database
+        {
+            let db = self.database.lock().await;
+            match db.list_groups() {
+                Ok(groups) => {
+                    for (group_id, name, state) in groups {
+                        // Load full group metadata
+                        match db.load_group_metadata(&group_id) {
+                            Ok(Some((name, founder_pubkey, our_member_id, epoch_number, epoch_key, policy, state))) => {
+                                // Load members
+                                let members = db.load_group_members(&group_id).unwrap_or_default();
+                                let members_map: std::collections::HashMap<[u8; 16], crate::protocol::GroupMember> =
+                                    members.into_iter().map(|m| (m.member_id, m)).collect();
+
+                                // Restore session
+                                match crate::messaging::group_session::GroupSession::restore_from_database(
+                                    group_id,
+                                    name.clone(),
+                                    founder_pubkey,
+                                    our_member_id,
+                                    epoch_number,
+                                    epoch_key,
+                                    policy,
+                                    state,
+                                    &self.identity,
+                                    members_map,
+                                ) {
+                                    Ok(session) => {
+                                        self.group_sessions.write().await.insert(group_id, session);
+                                        info!(group_name = %name, "Loaded group from database");
+                                    }
+                                    Err(e) => {
+                                        warn!(group_name = %name, error = %e, "Failed to restore group session");
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                warn!(group_name = %name, "Group metadata not found");
+                            }
+                            Err(e) => {
+                                warn!(group_name = %name, error = %e, "Failed to load group metadata");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to list groups from database");
+                }
+            }
+        }
+
         // Emit started event
         let _ = self.event_tx.send(DaemonEvent::Started {
             onion_address: onion_addr.clone(),

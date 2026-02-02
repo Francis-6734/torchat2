@@ -150,6 +150,55 @@ impl GroupSession {
         })
     }
 
+    /// Restore a group session from database.
+    ///
+    /// Used to restore groups when the daemon starts.
+    pub fn restore_from_database(
+        group_id: [u8; 32],
+        name: String,
+        founder_pubkey: [u8; 32],
+        our_member_id: [u8; 16],
+        epoch_number: u64,
+        epoch_key: [u8; 32],
+        policy: GroupPolicy,
+        state: GroupState,
+        identity: &TorIdentity,
+        members: HashMap<[u8; 16], GroupMember>,
+    ) -> Result<Self> {
+        let mut admins = HashSet::new();
+        for (member_id, member) in &members {
+            if member.is_admin {
+                admins.insert(*member_id);
+            }
+        }
+
+        info!(
+            group_id = ?group_id,
+            name = %name,
+            members = members.len(),
+            "Restored group from database"
+        );
+
+        Ok(Self {
+            id: group_id,
+            name,
+            founder_pubkey,
+            our_member_id,
+            our_signing_key: identity.signing_key().clone(),
+            policy,
+            state,
+            current_epoch_number: epoch_number,
+            current_epoch_key: Zeroizing::new(epoch_key),
+            epoch_history: VecDeque::new(),
+            members,
+            admins,
+            mesh: MeshTopology::new(group_id, DEFAULT_NEIGHBOR_COUNT),
+            gossip: GossipManager::new(group_id, 1000, 10),
+            messages: VecDeque::new(),
+            max_messages_in_memory: 1000,
+        })
+    }
+
     /// Generate an invite token for a new member.
     pub fn generate_invite(
         &self,
