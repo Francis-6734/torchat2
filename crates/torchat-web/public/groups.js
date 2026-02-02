@@ -2,12 +2,120 @@
 
 let currentGroup = null;
 let userGroups = [];
+let pendingInvites = [];
+
+// ========================================
+// Pending Invites
+// ========================================
+
+async function loadPendingInvites() {
+    const result = await api('/api/invites');
+    const section = document.getElementById('pending-invites-section');
+    const list = document.getElementById('pending-invites-list');
+
+    if (result.success && result.data && result.data.length > 0) {
+        pendingInvites = result.data;
+        section.style.display = 'block';
+
+        const html = result.data.map(inv => {
+            const expiresDate = new Date(inv.expires_at * 1000);
+            const now = new Date();
+            const hoursLeft = Math.max(0, Math.floor((expiresDate - now) / (1000 * 60 * 60)));
+            const expiresText = hoursLeft > 24
+                ? `Expires in ${Math.floor(hoursLeft / 24)} days`
+                : hoursLeft > 0
+                    ? `Expires in ${hoursLeft} hours`
+                    : 'Expires soon';
+
+            return `
+                <div class="invite-item" id="invite-${inv.id}">
+                    <div class="invite-header">
+                        <div class="invite-icon">📨</div>
+                        <div class="invite-info">
+                            <div class="invite-group-name">${escapeHtml(inv.group_name) || 'Unknown Group'}</div>
+                            <div class="invite-from">From: ${inv.bootstrap_peer.substring(0, 16)}...</div>
+                            <div class="invite-expires">⏰ ${expiresText}</div>
+                        </div>
+                    </div>
+                    <div class="invite-actions">
+                        <button class="invite-accept-btn" onclick="acceptInvite(${inv.id})">✓ Join Group</button>
+                        <button class="invite-decline-btn" onclick="declineInvite(${inv.id})">✗ Decline</button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        list.innerHTML = html;
+    } else {
+        pendingInvites = [];
+        section.style.display = 'none';
+        list.innerHTML = '';
+    }
+}
+
+async function acceptInvite(inviteId) {
+    const inviteEl = document.getElementById(`invite-${inviteId}`);
+    if (inviteEl) {
+        inviteEl.style.opacity = '0.5';
+        inviteEl.style.pointerEvents = 'none';
+    }
+
+    const result = await api(`/api/invites/${inviteId}/accept`, 'POST');
+
+    if (result.success) {
+        showToast('Joined group successfully!');
+        // Remove the invite from UI
+        if (inviteEl) inviteEl.remove();
+        // Check if any invites left
+        const remaining = document.querySelectorAll('.invite-item');
+        if (remaining.length === 0) {
+            document.getElementById('pending-invites-section').style.display = 'none';
+        }
+        // Reload groups to show the new group
+        await loadGroups();
+    } else {
+        if (inviteEl) {
+            inviteEl.style.opacity = '1';
+            inviteEl.style.pointerEvents = 'auto';
+        }
+        showToast('Failed to join: ' + (result.error || 'Unknown error'));
+    }
+}
+
+async function declineInvite(inviteId) {
+    if (!confirm('Decline this group invite?')) return;
+
+    const inviteEl = document.getElementById(`invite-${inviteId}`);
+    if (inviteEl) {
+        inviteEl.style.opacity = '0.5';
+    }
+
+    const result = await api(`/api/invites/${inviteId}/decline`, 'POST');
+
+    if (result.success) {
+        showToast('Invite declined');
+        if (inviteEl) inviteEl.remove();
+        // Check if any invites left
+        const remaining = document.querySelectorAll('.invite-item');
+        if (remaining.length === 0) {
+            document.getElementById('pending-invites-section').style.display = 'none';
+        }
+    } else {
+        if (inviteEl) {
+            inviteEl.style.opacity = '1';
+        }
+        showToast('Failed to decline invite');
+    }
+}
 
 // ========================================
 // Group Management
 // ========================================
 
 async function loadGroups() {
+    // Also load pending invites
+    loadPendingInvites();
+
     const result = await api('/api/groups');
     const list = document.getElementById('groups-list');
     const recentGroups = document.getElementById('recent-groups');
@@ -287,10 +395,37 @@ function openGroupMenu() {
 }
 
 // ========================================
+// Invite Polling
+// ========================================
+
+let invitePollingInterval = null;
+
+function startInvitePolling() {
+    if (invitePollingInterval) clearInterval(invitePollingInterval);
+    invitePollingInterval = setInterval(() => {
+        // Only poll when on the groups tab
+        const groupsPanel = document.getElementById('groups-panel');
+        if (groupsPanel && groupsPanel.classList.contains('active')) {
+            loadPendingInvites();
+        }
+    }, 10000); // Check every 10 seconds
+}
+
+function stopInvitePolling() {
+    if (invitePollingInterval) {
+        clearInterval(invitePollingInterval);
+        invitePollingInterval = null;
+    }
+}
+
+// ========================================
 // Event Listeners
 // ========================================
 
 document.addEventListener('DOMContentLoaded', () => {
+    // Start polling for invites
+    startInvitePolling();
+
     // Group message input
     const groupInput = document.getElementById('group-message-input');
     if (groupInput) {

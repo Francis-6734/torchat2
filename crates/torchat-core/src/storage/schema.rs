@@ -1,7 +1,7 @@
 //! Database schema definitions.
 
 /// Schema version for migrations.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// SQL to create the database schema.
 pub const CREATE_SCHEMA: &str = r#"
@@ -182,6 +182,25 @@ CREATE TABLE IF NOT EXISTS group_epoch_keys (
 );
 
 CREATE INDEX IF NOT EXISTS idx_epoch_keys_group ON group_epoch_keys(group_db_id);
+
+-- Pending received group invites (invites we received from others)
+CREATE TABLE IF NOT EXISTS pending_group_invites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    group_id BLOB NOT NULL,
+    group_name TEXT,
+    inviter_pubkey BLOB NOT NULL,
+    bootstrap_peer TEXT NOT NULL,
+    invite_id BLOB NOT NULL,
+    expires_at INTEGER NOT NULL,
+    invite_payload BLOB NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    received_at INTEGER NOT NULL,
+    UNIQUE(user_id, group_id, invite_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_invites_user ON pending_group_invites(user_id);
+CREATE INDEX IF NOT EXISTS idx_pending_invites_status ON pending_group_invites(status);
 
 -- Schema version
 INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', ?);

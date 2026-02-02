@@ -257,6 +257,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/groups/:group_id/invite", post(api::send_group_invite))
         .route("/api/groups/:group_id/messages", get(api::get_group_messages).post(api::send_group_message))
         .route("/api/groups/:group_id/leave", post(api::leave_group))
+        // Pending group invites
+        .route("/api/invites", get(api::list_pending_invites))
+        .route("/api/invites/:invite_id/accept", post(api::accept_pending_invite))
+        .route("/api/invites/:invite_id/decline", post(api::decline_pending_invite))
 
         // Apply default body limit for other routes
         .layer(RequestBodyLimitLayer::new(DEFAULT_BODY_LIMIT))

@@ -1123,6 +1123,155 @@ impl Database {
         messages.reverse();
         Ok(messages)
     }
+
+    // ========================================================================
+    // Pending group invites (received invites)
+    // ========================================================================
+
+    /// Store a pending group invite that was received.
+    pub fn store_pending_invite(
+        &self,
+        user_id: i64,
+        invite: &GroupInvitePayload,
+        group_name: Option<&str>,
+    ) -> Result<i64> {
+        let now = chrono::Utc::now().timestamp();
+
+        // Serialize the full invite payload
+        let invite_bytes = invite.to_bytes()
+            .map_err(|e| Error::Storage(format!("failed to serialize invite: {}", e)))?;
+
+        self.conn
+            .execute(
+                r#"
+                INSERT OR REPLACE INTO pending_group_invites
+                (user_id, group_id, group_name, inviter_pubkey, bootstrap_peer, invite_id, expires_at, invite_payload, status, received_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                "#,
+                params![
+                    user_id,
+                    invite.group_id.as_slice(),
+                    group_name,
+                    invite.inviter_pubkey.as_slice(),
+                    invite.bootstrap_peer,
+                    invite.invite_id.as_slice(),
+                    invite.expires_at,
+                    invite_bytes,
+                    now,
+                ],
+            )
+            .map_err(|e| Error::Storage(format!("failed to store pending invite: {}", e)))?;
+
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// List all pending invites for a user.
+    pub fn list_pending_invites(&self, user_id: i64) -> Result<Vec<PendingGroupInvite>> {
+        let now = chrono::Utc::now().timestamp();
+
+        let mut stmt = self
+            .conn
+            .prepare(
+                r#"
+                SELECT id, group_id, group_name, inviter_pubkey, bootstrap_peer, invite_id, expires_at, invite_payload, status, received_at
+                FROM pending_group_invites
+                WHERE user_id = ? AND status = 'pending' AND expires_at > ?
+                ORDER BY received_at DESC
+                "#,
+            )
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(params![user_id, now], |row| {
+                let group_id_vec: Vec<u8> = row.get(1)?;
+                let inviter_pubkey_vec: Vec<u8> = row.get(3)?;
+                let invite_id_vec: Vec<u8> = row.get(5)?;
+
+                Ok(PendingGroupInvite {
+                    id: row.get(0)?,
+                    group_id: group_id_vec,
+                    group_name: row.get(2)?,
+                    inviter_pubkey: inviter_pubkey_vec,
+                    bootstrap_peer: row.get(4)?,
+                    invite_id: invite_id_vec,
+                    expires_at: row.get(6)?,
+                    invite_payload: row.get(7)?,
+                    status: row.get(8)?,
+                    received_at: row.get(9)?,
+                })
+            })
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let mut invites = Vec::new();
+        for row in rows {
+            invites.push(row.map_err(|e| Error::Storage(e.to_string()))?);
+        }
+
+        Ok(invites)
+    }
+
+    /// Get a specific pending invite by ID.
+    pub fn get_pending_invite(&self, invite_db_id: i64) -> Result<Option<PendingGroupInvite>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                r#"
+                SELECT id, group_id, group_name, inviter_pubkey, bootstrap_peer, invite_id, expires_at, invite_payload, status, received_at
+                FROM pending_group_invites
+                WHERE id = ?
+                "#,
+            )
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let result = stmt.query_row(params![invite_db_id], |row| {
+            let group_id_vec: Vec<u8> = row.get(1)?;
+            let inviter_pubkey_vec: Vec<u8> = row.get(3)?;
+            let invite_id_vec: Vec<u8> = row.get(5)?;
+
+            Ok(PendingGroupInvite {
+                id: row.get(0)?,
+                group_id: group_id_vec,
+                group_name: row.get(2)?,
+                inviter_pubkey: inviter_pubkey_vec,
+                bootstrap_peer: row.get(4)?,
+                invite_id: invite_id_vec,
+                expires_at: row.get(6)?,
+                invite_payload: row.get(7)?,
+                status: row.get(8)?,
+                received_at: row.get(9)?,
+            })
+        });
+
+        match result {
+            Ok(invite) => Ok(Some(invite)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(Error::Storage(e.to_string())),
+        }
+    }
+
+    /// Update the status of a pending invite.
+    pub fn update_pending_invite_status(&self, invite_db_id: i64, status: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE pending_group_invites SET status = ? WHERE id = ?",
+                params![status, invite_db_id],
+            )
+            .map_err(|e| Error::Storage(format!("failed to update invite status: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Delete a pending invite.
+    pub fn delete_pending_invite(&self, invite_db_id: i64) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM pending_group_invites WHERE id = ?",
+                params![invite_db_id],
+            )
+            .map_err(|e| Error::Storage(format!("failed to delete invite: {}", e)))?;
+
+        Ok(())
+    }
 }
 
 /// User info for listing.
@@ -1138,6 +1287,32 @@ pub struct UserInfo {
     pub last_active: i64,
     /// Unix timestamp of account creation.
     pub created_at: i64,
+}
+
+/// Pending group invite received from another user.
+#[derive(Debug, Clone, Serialize)]
+pub struct PendingGroupInvite {
+    /// Database ID.
+    pub id: i64,
+    /// Group ID (32 bytes).
+    pub group_id: Vec<u8>,
+    /// Group name (if decrypted from metadata).
+    pub group_name: Option<String>,
+    /// Inviter's public key (32 bytes).
+    pub inviter_pubkey: Vec<u8>,
+    /// Bootstrap peer address (inviter's onion address).
+    pub bootstrap_peer: String,
+    /// Invite ID (16 bytes).
+    pub invite_id: Vec<u8>,
+    /// Expiration timestamp.
+    pub expires_at: i64,
+    /// Full serialized invite payload.
+    #[serde(skip)]
+    pub invite_payload: Vec<u8>,
+    /// Status: pending, accepted, declined.
+    pub status: String,
+    /// When the invite was received.
+    pub received_at: i64,
 }
 
 /// Simple message for web interface.

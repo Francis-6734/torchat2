@@ -689,6 +689,79 @@
             flex: 1;
         }
 
+        /* Pending invite items */
+        .invite-item {
+            background: linear-gradient(135deg, #667eea15 0%, #764ba215 100%);
+            border: 1px solid #667eea40;
+            border-radius: 12px;
+            padding: 14px;
+            margin-bottom: 10px;
+        }
+
+        .invite-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+
+        .invite-icon {
+            font-size: 24px;
+        }
+
+        .invite-info {
+            flex: 1;
+        }
+
+        .invite-group-name {
+            font-weight: 600;
+            font-size: 15px;
+            color: #333;
+        }
+
+        .invite-from {
+            font-size: 11px;
+            color: #888;
+            font-family: monospace;
+        }
+
+        .invite-expires {
+            font-size: 11px;
+            color: #e67e22;
+            margin-top: 4px;
+        }
+
+        .invite-actions {
+            display: flex;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .invite-actions button {
+            flex: 1;
+            padding: 10px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.1s;
+        }
+
+        .invite-actions button:active {
+            transform: scale(0.98);
+        }
+
+        .invite-accept-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .invite-decline-btn {
+            background: #f0f0f0;
+            color: #666;
+        }
+
         /* Loading */
         .loading {
             text-align: center;
@@ -790,6 +863,13 @@
             <!-- Groups Tab -->
             <div class="tab-panel" id="groups-panel">
                 <div class="contacts-panel">
+                    <!-- Pending Invites Section -->
+                    <div id="pending-invites-section" style="display: none;">
+                        <div style="padding: 8px; margin-bottom: 8px;">
+                            <h4 style="color: #667eea; font-size: 14px; margin-bottom: 8px;">📬 Pending Invites</h4>
+                            <div id="pending-invites-list"></div>
+                        </div>
+                    </div>
                     <div class="group-actions">
                         <button class="btn" onclick="openCreateGroupModal()">Create Group</button>
                         <button class="btn btn-secondary" onclick="openJoinGroupModal()">Join Group</button>

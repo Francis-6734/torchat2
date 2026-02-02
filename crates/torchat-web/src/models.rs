@@ -172,6 +172,19 @@ pub struct SendGroupMessageRequest {
     pub content: String,
 }
 
+/// Pending group invite information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingInviteInfo {
+    pub id: i64,
+    pub group_id: String,
+    pub group_name: Option<String>,
+    pub inviter_pubkey: String,
+    pub bootstrap_peer: String,
+    pub expires_at: i64,
+    pub received_at: i64,
+}
+
+
 /// API response
 #[derive(Debug, Serialize)]
 pub struct ApiResponse<T: Serialize> {

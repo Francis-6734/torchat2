@@ -347,6 +347,24 @@ async fn ensure_daemon_running(
                         output_path,
                     ).await;
                 }
+                DaemonEvent::GroupInviteReceived { invite } => {
+                    info!(
+                        user_id = user_id_clone,
+                        group_id = ?invite.group_id,
+                        bootstrap_peer = %invite.bootstrap_peer,
+                        "Group invite received (auto-start daemon)"
+                    );
+                    // Parse group name from encrypted metadata (format: "name|policy")
+                    let group_name = String::from_utf8(invite.encrypted_metadata.clone())
+                        .ok()
+                        .and_then(|s| s.split('|').next().map(|n| n.to_string()));
+
+                    // Store the invite in the database
+                    let db = state_clone.database.lock().await;
+                    if let Err(e) = db.store_pending_invite(user_id_clone, &invite, group_name.as_deref()) {
+                        warn!(user_id = user_id_clone, error = %e, "Failed to store pending invite");
+                    }
+                }
                 DaemonEvent::Stopped => {
                     info!(user_id = user_id_clone, "Auto-start daemon event listener stopped");
                     break;
@@ -692,6 +710,24 @@ pub async fn start_daemon(
                                 from,
                                 output_path,
                             ).await;
+                        }
+                        DaemonEvent::GroupInviteReceived { invite } => {
+                            info!(
+                                user_id = user_id_clone,
+                                group_id = ?invite.group_id,
+                                bootstrap_peer = %invite.bootstrap_peer,
+                                "Group invite received"
+                            );
+                            // Parse group name from encrypted metadata (format: "name|policy")
+                            let group_name = String::from_utf8(invite.encrypted_metadata.clone())
+                                .ok()
+                                .and_then(|s| s.split('|').next().map(|n| n.to_string()));
+
+                            // Store the invite in the database
+                            let db = state_clone.database.lock().await;
+                            if let Err(e) = db.store_pending_invite(user_id_clone, &invite, group_name.as_deref()) {
+                                warn!(user_id = user_id_clone, error = %e, "Failed to store pending invite");
+                            }
                         }
                         DaemonEvent::Stopped => {
                             info!(user_id = user_id_clone, "Daemon event listener stopped");
@@ -2492,5 +2528,306 @@ pub async fn leave_group(
     (
         StatusCode::OK,
         Json(ApiResponse::ok("Left group successfully".to_string())),
+    )
+}
+
+// ============================================================================
+// Pending Group Invites
+// ============================================================================
+
+/// List pending group invites for the current user
+pub async fn list_pending_invites(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<ApiResponse<Vec<PendingInviteInfo>>>) {
+    let session_token = match extract_session_token(&headers) {
+        Some(token) => token,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("No session token".to_string()),
+                }),
+            );
+        }
+    };
+
+    let db = state.database.lock().await;
+    let (user_id, _identity, _display_name) = match db.get_user_by_session(&session_token) {
+        Ok(Some(user)) => user,
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid session".to_string()),
+                }),
+            );
+        }
+    };
+
+    let invites = match db.list_pending_invites(user_id) {
+        Ok(invites) => invites,
+        Err(e) => {
+            warn!(user_id, error = %e, "Failed to list pending invites");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Failed to list pending invites".to_string()),
+                }),
+            );
+        }
+    };
+
+    let invite_infos: Vec<PendingInviteInfo> = invites
+        .into_iter()
+        .map(|inv| PendingInviteInfo {
+            id: inv.id,
+            group_id: hex::encode(&inv.group_id),
+            group_name: inv.group_name,
+            inviter_pubkey: hex::encode(&inv.inviter_pubkey),
+            bootstrap_peer: inv.bootstrap_peer,
+            expires_at: inv.expires_at,
+            received_at: inv.received_at,
+        })
+        .collect();
+
+    info!(user_id, count = invite_infos.len(), "Listed pending invites");
+
+    (StatusCode::OK, Json(ApiResponse::ok(invite_infos)))
+}
+
+/// Accept a pending group invite
+pub async fn accept_pending_invite(
+    headers: HeaderMap,
+    Path(invite_id): Path<i64>,
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<ApiResponse<GroupInfo>>) {
+    let session_token = match extract_session_token(&headers) {
+        Some(token) => token,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("No session token".to_string()),
+                }),
+            );
+        }
+    };
+
+    let db = state.database.lock().await;
+    let (user_id, _identity, _display_name) = match db.get_user_by_session(&session_token) {
+        Ok(Some(user)) => user,
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid session".to_string()),
+                }),
+            );
+        }
+    };
+
+    // Get the pending invite
+    let pending_invite = match db.get_pending_invite(invite_id) {
+        Ok(Some(inv)) => inv,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invite not found".to_string()),
+                }),
+            );
+        }
+        Err(e) => {
+            warn!(user_id, invite_id, error = %e, "Failed to get pending invite");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Failed to get invite".to_string()),
+                }),
+            );
+        }
+    };
+
+    // Check if invite has expired
+    let now = chrono::Utc::now().timestamp();
+    if now > pending_invite.expires_at {
+        // Mark as expired
+        let _ = db.update_pending_invite_status(invite_id, "expired");
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some("Invite has expired".to_string()),
+            }),
+        );
+    }
+
+    // Deserialize the invite payload
+    let invite: torchat_core::protocol::GroupInvitePayload = match bincode::deserialize(&pending_invite.invite_payload) {
+        Ok(inv) => inv,
+        Err(e) => {
+            warn!(user_id, invite_id, error = %e, "Failed to deserialize invite payload");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid invite data".to_string()),
+                }),
+            );
+        }
+    };
+
+    drop(db); // Release the database lock before sending command
+
+    // Get the daemon
+    let daemons = state.daemons.lock().await;
+    let daemon = match daemons.get(&user_id) {
+        Some(d) => d.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Daemon not running".to_string()),
+                }),
+            );
+        }
+    };
+    drop(daemons);
+
+    // Send JoinGroup command to daemon
+    use torchat_core::messaging::DaemonCommand;
+    if let Err(e) = daemon.command_sender().send(DaemonCommand::JoinGroup {
+        invite: invite.clone(),
+    }).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Failed to join group: {}", e)),
+            }),
+        );
+    }
+
+    // Mark the invite as accepted
+    let db = state.database.lock().await;
+    if let Err(e) = db.update_pending_invite_status(invite_id, "accepted") {
+        warn!(user_id, invite_id, error = %e, "Failed to update invite status");
+    }
+
+    let group_name = pending_invite.group_name.unwrap_or_else(|| "Group".to_string());
+
+    info!(user_id, invite_id, group_id = ?invite.group_id, "Accepted group invite");
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse::ok(GroupInfo {
+            group_id: hex::encode(invite.group_id),
+            name: group_name,
+            member_count: 0,
+            state: "Active".to_string(),
+            is_founder: false,
+        })),
+    )
+}
+
+/// Decline a pending group invite
+pub async fn decline_pending_invite(
+    headers: HeaderMap,
+    Path(invite_id): Path<i64>,
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<ApiResponse<String>>) {
+    let session_token = match extract_session_token(&headers) {
+        Some(token) => token,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("No session token".to_string()),
+                }),
+            );
+        }
+    };
+
+    let db = state.database.lock().await;
+    let (user_id, _identity, _display_name) = match db.get_user_by_session(&session_token) {
+        Ok(Some(user)) => user,
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid session".to_string()),
+                }),
+            );
+        }
+    };
+
+    // Get the pending invite to verify it exists
+    match db.get_pending_invite(invite_id) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invite not found".to_string()),
+                }),
+            );
+        }
+        Err(e) => {
+            warn!(user_id, invite_id, error = %e, "Failed to get pending invite");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Failed to get invite".to_string()),
+                }),
+            );
+        }
+    };
+
+    // Mark as declined
+    if let Err(e) = db.update_pending_invite_status(invite_id, "declined") {
+        warn!(user_id, invite_id, error = %e, "Failed to decline invite");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some("Failed to decline invite".to_string()),
+            }),
+        );
+    }
+
+    info!(user_id, invite_id, "Declined group invite");
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse::ok("Invite declined".to_string())),
     )
 }
