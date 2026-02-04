@@ -308,6 +308,37 @@ pub enum DaemonEvent {
         /// Initial member list.
         member_list: Vec<crate::protocol::GroupMember>,
     },
+    /// A file was shared in a group (metadata received via gossip).
+    GroupFileShared {
+        /// Group ID.
+        group_id: [u8; 32],
+        /// File ID.
+        file_id: String,
+        /// Filename.
+        filename: String,
+        /// File size.
+        size: u64,
+        /// Sender's onion address.
+        sender_onion: String,
+    },
+    /// A group file download completed.
+    GroupFileDownloaded {
+        /// Group ID.
+        group_id: [u8; 32],
+        /// File ID.
+        file_id: String,
+        /// Local output path.
+        output_path: String,
+    },
+    /// A group file download failed.
+    GroupFileDownloadFailed {
+        /// Group ID.
+        group_id: [u8; 32],
+        /// File ID.
+        file_id: String,
+        /// Error description.
+        error: String,
+    },
 }
 
 /// Commands to send to the daemon.
@@ -428,6 +459,24 @@ pub enum DaemonCommand {
     RotateGroupKey {
         /// Group ID.
         group_id: [u8; 32],
+    },
+    /// Share a file in a group chat.
+    SendGroupFile {
+        /// Group ID.
+        group_id: [u8; 32],
+        /// Path to the file on disk.
+        file_path: std::path::PathBuf,
+        /// Original filename.
+        filename: String,
+    },
+    /// Download a file shared in a group chat.
+    DownloadGroupFile {
+        /// Group ID.
+        group_id: [u8; 32],
+        /// File ID (hex transfer ID from the metadata announcement).
+        file_id: String,
+        /// Sender's onion address.
+        sender_onion: String,
     },
 }
 
@@ -635,6 +684,32 @@ impl MessagingDaemon {
             onion_address: onion_addr.clone(),
         });
 
+        // Shared map for invites awaiting acceptance (JoinGroup -> GroupJoinAccept)
+        let pending_join_invites: Arc<RwLock<HashMap<[u8; 32], crate::protocol::GroupInvitePayload>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+
+        // Shared map for files we're serving to group members (file_id -> path)
+        let staged_group_files: Arc<RwLock<HashMap<String, std::path::PathBuf>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+
+        // Load existing staged group files from database
+        {
+            let db = self.database.lock().await;
+            let groups = self.group_sessions.read().await;
+            for group_id in groups.keys() {
+                if let Ok(files) = db.load_group_files(group_id, 1000) {
+                    let mut staged = staged_group_files.write().await;
+                    for file in files {
+                        if let Some(ref path) = file.local_path {
+                            if std::path::Path::new(path).exists() {
+                                staged.insert(file.file_id, std::path::PathBuf::from(path));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Spawn listener task
         let sessions = self.sessions.clone();
         let event_tx = self.event_tx.clone();
@@ -643,9 +718,12 @@ impl MessagingDaemon {
         let database = self.database.clone();
         let user_id = self.user_id;
         let group_sessions = self.group_sessions.clone();
+        let tor_config_listen = self.tor_config.clone();
+        let pending_join_invites_listen = pending_join_invites.clone();
+        let staged_group_files_listen = staged_group_files.clone();
 
         tokio::spawn(async move {
-            Self::listen_loop(service, sessions, event_tx, running, identity, database, user_id, group_sessions).await;
+            Self::listen_loop(service, sessions, event_tx, running, identity, database, user_id, group_sessions, tor_config_listen, pending_join_invites_listen, staged_group_files_listen).await;
         });
 
         // Spawn command handler
@@ -658,9 +736,11 @@ impl MessagingDaemon {
         let pending_queue = self.pending_queue.clone();
         let group_sessions = self.group_sessions.clone();
         let database = self.database.clone();
+        let pending_join_invites_cmd = pending_join_invites.clone();
+        let staged_group_files_cmd = staged_group_files.clone();
 
         tokio::spawn(async move {
-            Self::command_loop(cmd_rx, sessions, event_tx, running, tor_config, identity, pending_queue, group_sessions, database).await;
+            Self::command_loop(cmd_rx, sessions, event_tx, running, tor_config, identity, pending_queue, group_sessions, database, pending_join_invites_cmd, staged_group_files_cmd).await;
         });
 
         // Spawn retry worker for failed messages
@@ -772,6 +852,9 @@ impl MessagingDaemon {
         database: Arc<TokioMutex<Database>>,
         user_id: i64,
         group_sessions: Arc<RwLock<HashMap<[u8; 32], crate::messaging::group_session::GroupSession>>>,
+        tor_config: TorConnectionConfig,
+        pending_join_invites: Arc<RwLock<HashMap<[u8; 32], crate::protocol::GroupInvitePayload>>>,
+        staged_group_files: Arc<RwLock<HashMap<String, std::path::PathBuf>>>,
     ) {
         info!("Listening for incoming connections...");
 
@@ -798,10 +881,13 @@ impl MessagingDaemon {
                     let identity = identity.clone();
                     let database = database.clone();
                     let group_sessions = group_sessions.clone();
+                    let tor_config = tor_config.clone();
+                    let pending_join_invites = pending_join_invites.clone();
+                    let staged_group_files = staged_group_files.clone();
 
                     tokio::spawn(async move {
                         if let Err(e) =
-                            Self::handle_incoming(stream, sessions, event_tx, identity, database, user_id, group_sessions).await
+                            Self::handle_incoming(stream, sessions, event_tx, identity, database, user_id, group_sessions, tor_config, pending_join_invites, staged_group_files).await
                         {
                             warn!(error = %e, "Error handling incoming connection");
                         }
@@ -836,15 +922,33 @@ impl MessagingDaemon {
         database: Arc<TokioMutex<Database>>,
         user_id: i64,
         group_sessions: Arc<RwLock<HashMap<[u8; 32], crate::messaging::group_session::GroupSession>>>,
+        tor_config: TorConnectionConfig,
+        pending_join_invites: Arc<RwLock<HashMap<[u8; 32], crate::protocol::GroupInvitePayload>>>,
+        staged_group_files: Arc<RwLock<HashMap<String, std::path::PathBuf>>>,
     ) -> Result<()> {
         use tokio::io::AsyncReadExt;
 
         debug!("Handling incoming connection");
 
-        // Peek at first 8 bytes to detect file transfer
+        // Peek at first 8 bytes to detect file transfer or file request
         let mut magic_buf = [0u8; 8];
         stream.read_exact(&mut magic_buf).await
             .map_err(|e| Error::Tor(format!("Failed to read magic: {}", e)))?;
+
+        // Check if this is a file request (group file download)
+        if crate::messaging::stream_transfer::is_file_request_magic(&magic_buf) {
+            info!("Detected incoming file request stream");
+            let our_address = identity.onion_address().to_string();
+            match crate::messaging::stream_transfer::handle_file_request(
+                &mut stream,
+                &staged_group_files,
+                &our_address,
+            ).await {
+                Ok(()) => info!("File request served successfully"),
+                Err(e) => warn!(error = %e, "Failed to serve file request"),
+            }
+            return Ok(());
+        }
 
         // Check if this is a file transfer
         if crate::messaging::stream_transfer::is_file_transfer_magic(&magic_buf) {
@@ -996,7 +1100,7 @@ impl MessagingDaemon {
 
                 // Handle subsequent packets on this connection
                 drop(sessions_guard);
-                Self::handle_connection_loop(stream, peer_addr_str, sessions, event_tx, database, user_id, group_sessions, identity).await?;
+                Self::handle_connection_loop(stream, peer_addr_str, sessions, event_tx, database, user_id, group_sessions, identity, tor_config.clone(), pending_join_invites.clone()).await?;
 
                 Ok(())
             }
@@ -1030,15 +1134,15 @@ impl MessagingDaemon {
             }
             PacketType::GroupMessage => {
                 // Handle group message (gossip)
-                Self::handle_group_message_packet(&packet, &event_tx, &group_sessions).await
+                Self::handle_group_message_packet(&packet, &event_tx, &group_sessions, &database).await
             }
             PacketType::GroupJoinRequest => {
                 // Handle join request from new member
-                Self::handle_group_join_request_packet(&packet, &event_tx, &group_sessions, &identity).await
+                Self::handle_group_join_request_packet(&packet, &event_tx, &group_sessions, &identity, &tor_config).await
             }
             PacketType::GroupJoinAccept => {
                 // Handle join accept from bootstrap peer
-                Self::handle_group_join_accept_packet(&packet, &event_tx).await
+                Self::handle_group_join_accept_packet(&packet, &event_tx, &group_sessions, &identity, &database, user_id, &pending_join_invites).await
             }
             _ => {
                 warn!(packet_type = ?packet.header.packet_type, "Unhandled packet type");
@@ -1057,6 +1161,8 @@ impl MessagingDaemon {
         user_id: i64,
         group_sessions: Arc<RwLock<HashMap<[u8; 32], crate::messaging::group_session::GroupSession>>>,
         identity: TorIdentity,
+        tor_config: TorConnectionConfig,
+        pending_join_invites: Arc<RwLock<HashMap<[u8; 32], crate::protocol::GroupInvitePayload>>>,
     ) -> Result<()> {
         debug!(peer = %peer_address, "Entering connection loop");
         loop {
@@ -1164,19 +1270,19 @@ impl MessagingDaemon {
                         }
                         PacketType::GroupMessage => {
                             // Handle group message (gossip)
-                            if let Err(e) = Self::handle_group_message_packet(&packet, &event_tx, &group_sessions).await {
+                            if let Err(e) = Self::handle_group_message_packet(&packet, &event_tx, &group_sessions, &database).await {
                                 warn!(error = %e, "Failed to handle group message");
                             }
                         }
                         PacketType::GroupJoinRequest => {
                             // Handle join request from new member
-                            if let Err(e) = Self::handle_group_join_request_packet(&packet, &event_tx, &group_sessions, &identity).await {
+                            if let Err(e) = Self::handle_group_join_request_packet(&packet, &event_tx, &group_sessions, &identity, &tor_config).await {
                                 warn!(error = %e, "Failed to handle group join request");
                             }
                         }
                         PacketType::GroupJoinAccept => {
                             // Handle join accept from bootstrap peer
-                            if let Err(e) = Self::handle_group_join_accept_packet(&packet, &event_tx).await {
+                            if let Err(e) = Self::handle_group_join_accept_packet(&packet, &event_tx, &group_sessions, &identity, &database, user_id, &pending_join_invites).await {
                                 warn!(error = %e, "Failed to handle group join accept");
                             }
                         }
@@ -1482,6 +1588,8 @@ impl MessagingDaemon {
         pending_queue: Arc<TokioMutex<VecDeque<PendingMessage>>>,
         group_sessions: Arc<RwLock<HashMap<[u8; 32], crate::messaging::group_session::GroupSession>>>,
         database: Arc<TokioMutex<Database>>,
+        pending_join_invites: Arc<RwLock<HashMap<[u8; 32], crate::protocol::GroupInvitePayload>>>,
+        staged_group_files: Arc<RwLock<HashMap<String, std::path::PathBuf>>>,
     ) {
         let mut cmd_rx: tokio::sync::MutexGuard<'_, mpsc::Receiver<DaemonCommand>> = cmd_rx.lock().await;
 
@@ -1762,6 +1870,12 @@ impl MessagingDaemon {
                         request_signature,
                     };
 
+                    // Store invite so we can create the session when accept arrives
+                    {
+                        let mut invites = pending_join_invites.write().await;
+                        invites.insert(invite.group_id, invite.clone());
+                    }
+
                     // Connect to bootstrap peer and send join request
                     info!(
                         bootstrap_peer = %invite.bootstrap_peer,
@@ -1854,6 +1968,184 @@ impl MessagingDaemon {
                     } else {
                         warn!(group_id = ?group_id, "Group not found");
                     }
+                }
+                DaemonCommand::SendGroupFile { group_id, file_path, filename } => {
+                    info!(group_id = ?group_id, filename = %filename, "Sharing file with group");
+
+                    // Compute file hash and size
+                    let hash = match crate::messaging::stream_transfer::compute_file_hash(&file_path).await {
+                        Ok(h) => h,
+                        Err(e) => {
+                            warn!(error = %e, "Failed to compute file hash");
+                            continue;
+                        }
+                    };
+                    let file_size = match tokio::fs::metadata(&file_path).await {
+                        Ok(m) => m.len(),
+                        Err(e) => {
+                            warn!(error = %e, "Failed to read file metadata");
+                            continue;
+                        }
+                    };
+
+                    // Generate file_id
+                    let file_id_bytes: [u8; 16] = crate::crypto::random_bytes();
+                    let file_id_hex = hex::encode(file_id_bytes);
+
+                    // Stage file for serving
+                    let staged_dir = format!("{}/.torchat/group_uploads",
+                        std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));
+                    if let Err(e) = tokio::fs::create_dir_all(&staged_dir).await {
+                        warn!(error = %e, "Failed to create group uploads directory");
+                        continue;
+                    }
+                    let staged_path = format!("{}/{}_{}", staged_dir, file_id_hex, filename);
+                    if let Err(e) = tokio::fs::copy(&file_path, &staged_path).await {
+                        warn!(error = %e, "Failed to stage file for serving");
+                        continue;
+                    }
+
+                    // Register in staged files map
+                    {
+                        let mut staged = staged_group_files.write().await;
+                        staged.insert(file_id_hex.clone(), std::path::PathBuf::from(&staged_path));
+                    }
+
+                    // Store in database
+                    let sender_onion = identity.onion_address().to_string();
+                    let our_member_id = {
+                        let groups = group_sessions.read().await;
+                        groups.get(&group_id).map(|s| s.our_member_id)
+                    };
+                    if let Some(member_id) = our_member_id {
+                        let db = database.lock().await;
+                        if let Err(e) = db.store_group_file(
+                            &group_id, &file_id_hex, &filename, file_size,
+                            &hash, &member_id, &sender_onion,
+                            Some(&staged_path), "available",
+                        ) {
+                            warn!(error = %e, "Failed to store group file in database");
+                        }
+                    }
+
+                    // Build [FILE_META] JSON and send as group message
+                    let meta_json = serde_json::json!({
+                        "file_id": file_id_hex,
+                        "filename": filename,
+                        "size": file_size,
+                        "hash": hex::encode(hash),
+                        "sender_onion": sender_onion,
+                    });
+                    let content = format!("[FILE_META]{}", meta_json);
+
+                    // Send via existing group message path
+                    let mut groups = group_sessions.write().await;
+                    if let Some(session) = groups.get_mut(&group_id) {
+                        match session.send_message(&content) {
+                            Ok(payload) => {
+                                // Store message in database
+                                if let Some(last_message) = session.messages.back() {
+                                    if let Err(e) = database.lock().await.store_group_message(&group_id, last_message) {
+                                        warn!(error = %e, "Failed to persist group file message");
+                                    }
+                                }
+                                // Forward to all neighbors
+                                for neighbor in session.mesh.active_neighbors() {
+                                    let _ = Self::send_group_message_to_peer(
+                                        &neighbor.onion_address,
+                                        &payload,
+                                        &sessions,
+                                        &tor_config,
+                                    ).await;
+                                }
+                                info!(group_id = ?group_id, file_id = %file_id_hex, "Group file shared");
+                            }
+                            Err(e) => {
+                                warn!(group_id = ?group_id, error = %e, "Failed to send group file announcement");
+                            }
+                        }
+                    } else {
+                        warn!(group_id = ?group_id, "Group not found for file sharing");
+                    }
+                }
+                DaemonCommand::DownloadGroupFile { group_id, file_id, sender_onion } => {
+                    info!(group_id = ?group_id, file_id = %file_id, sender = %sender_onion, "Downloading group file");
+
+                    // Update status to downloading
+                    {
+                        let db = database.lock().await;
+                        let _ = db.update_group_file_status(&file_id, "downloading", None);
+                    }
+
+                    // Spawn download task
+                    let tor_config_dl = tor_config.clone();
+                    let database_dl = database.clone();
+                    let event_tx_dl = event_tx.clone();
+                    let file_id_dl = file_id.clone();
+                    let staged_files_dl = staged_group_files.clone();
+
+                    tokio::spawn(async move {
+                        let download_dir = std::env::var("TORCHAT_DOWNLOAD_DIR")
+                            .unwrap_or_else(|_| format!("{}/.torchat/downloads",
+                                std::env::var("HOME").unwrap_or_else(|_| ".".to_string())));
+                        let _ = tokio::fs::create_dir_all(&download_dir).await;
+
+                        match crate::messaging::stream_transfer::request_file_from_peer(
+                            &file_id_dl,
+                            &sender_onion,
+                            std::path::PathBuf::from(&download_dir),
+                            &tor_config_dl,
+                        ).await {
+                            Ok(result) if result.success => {
+                                let output_path = result.output_path
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or_default();
+
+                                // Update database
+                                {
+                                    let db = database_dl.lock().await;
+                                    let _ = db.update_group_file_status(&file_id_dl, "downloaded", Some(&output_path));
+                                }
+
+                                // Also register in staged files so we can serve it to others
+                                {
+                                    let mut staged = staged_files_dl.write().await;
+                                    staged.insert(file_id_dl.clone(), std::path::PathBuf::from(&output_path));
+                                }
+
+                                let _ = event_tx_dl.send(DaemonEvent::GroupFileDownloaded {
+                                    group_id,
+                                    file_id: file_id_dl,
+                                    output_path,
+                                });
+                                info!("Group file downloaded successfully");
+                            }
+                            Ok(result) => {
+                                let error = result.error.unwrap_or_else(|| "Transfer failed".to_string());
+                                {
+                                    let db = database_dl.lock().await;
+                                    let _ = db.update_group_file_status(&file_id_dl, "failed", None);
+                                }
+                                let _ = event_tx_dl.send(DaemonEvent::GroupFileDownloadFailed {
+                                    group_id,
+                                    file_id: file_id_dl,
+                                    error,
+                                });
+                            }
+                            Err(e) => {
+                                {
+                                    let db = database_dl.lock().await;
+                                    let _ = db.update_group_file_status(&file_id_dl, "failed", None);
+                                }
+                                let _ = event_tx_dl.send(DaemonEvent::GroupFileDownloadFailed {
+                                    group_id,
+                                    file_id: file_id_dl,
+                                    error: e.to_string(),
+                                });
+                                warn!(error = %e, "Group file download failed");
+                            }
+                        }
+                    });
                 }
             }
         }
@@ -2429,6 +2721,7 @@ impl MessagingDaemon {
         packet: &Packet,
         event_tx: &broadcast::Sender<DaemonEvent>,
         group_sessions: &Arc<RwLock<HashMap<[u8; 32], crate::messaging::group_session::GroupSession>>>,
+        database: &Arc<TokioMutex<Database>>,
     ) -> Result<()> {
         let payload = crate::protocol::GroupMessagePayload::from_bytes(&packet.payload)?;
 
@@ -2445,7 +2738,54 @@ impl MessagingDaemon {
             // Process message through gossip manager
             match session.receive_message(&payload) {
                 Ok(Some(received)) => {
-                    // New message received - emit event
+                    // Check if this is a file metadata message
+                    if received.content.starts_with("[FILE_META]") {
+                        let json_str = &received.content["[FILE_META]".len()..];
+                        if let Ok(meta) = serde_json::from_str::<serde_json::Value>(json_str) {
+                            let file_id = meta["file_id"].as_str().unwrap_or_default().to_string();
+                            let filename = meta["filename"].as_str().unwrap_or_default().to_string();
+                            let size = meta["size"].as_u64().unwrap_or(0);
+                            let hash_hex = meta["hash"].as_str().unwrap_or_default();
+                            let sender_onion = meta["sender_onion"].as_str().unwrap_or_default().to_string();
+
+                            let mut file_hash = [0u8; 32];
+                            if let Ok(bytes) = hex::decode(hash_hex) {
+                                if bytes.len() == 32 {
+                                    file_hash.copy_from_slice(&bytes);
+                                }
+                            }
+
+                            // Store file metadata in database
+                            {
+                                let db = database.lock().await;
+                                if let Err(e) = db.store_group_file(
+                                    &payload.group_id, &file_id, &filename, size,
+                                    &file_hash, &received.sender_id, &sender_onion,
+                                    None, "available",
+                                ) {
+                                    warn!(error = %e, "Failed to store group file metadata");
+                                }
+                            }
+
+                            // Emit file shared event
+                            let _ = event_tx.send(DaemonEvent::GroupFileShared {
+                                group_id: payload.group_id,
+                                file_id: file_id.clone(),
+                                filename: filename.clone(),
+                                size,
+                                sender_onion,
+                            });
+
+                            info!(
+                                group_id = ?payload.group_id,
+                                file_id = %file_id,
+                                filename = %filename,
+                                "Group file metadata received"
+                            );
+                        }
+                    }
+
+                    // Always emit GroupMessageReceived so message appears in chat
                     let _ = event_tx.send(DaemonEvent::GroupMessageReceived {
                         group_id: payload.group_id,
                         sender_id: received.sender_id,
@@ -2491,6 +2831,7 @@ impl MessagingDaemon {
         event_tx: &broadcast::Sender<DaemonEvent>,
         group_sessions: &Arc<RwLock<HashMap<[u8; 32], crate::messaging::group_session::GroupSession>>>,
         identity: &TorIdentity,
+        tor_config: &TorConnectionConfig,
     ) -> Result<()> {
         let payload = crate::protocol::GroupJoinRequestPayload::from_bytes(&packet.payload)?;
 
@@ -2569,11 +2910,49 @@ impl MessagingDaemon {
                         "Accepting join request"
                     );
 
-                    // Emit event to send accept response
+                    // Emit event for tracking
                     let _ = event_tx.send(DaemonEvent::GroupJoinAcceptReady {
                         group_id: payload.group_id,
-                        joiner_onion: payload.requester_onion,
-                        accept_payload: accept,
+                        joiner_onion: payload.requester_onion.clone(),
+                        accept_payload: accept.clone(),
+                    });
+
+                    // Send accept packet directly to the joiner
+                    let joiner_onion = payload.requester_onion.clone();
+                    let tor_config_clone = tor_config.clone();
+                    tokio::spawn(async move {
+                        let accept_bytes = match accept.to_bytes() {
+                            Ok(b) => b,
+                            Err(e) => {
+                                warn!(error = %e, "Failed to serialize join accept");
+                                return;
+                            }
+                        };
+                        let accept_packet = match Packet::new(PacketType::GroupJoinAccept, accept_bytes) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                warn!(error = %e, "Failed to create join accept packet");
+                                return;
+                            }
+                        };
+                        let peer_addr = match OnionAddress::from_string(&joiner_onion) {
+                            Ok(a) => a,
+                            Err(e) => {
+                                warn!(error = %e, joiner = %joiner_onion, "Invalid joiner address");
+                                return;
+                            }
+                        };
+                        match TorConnection::connect(&tor_config_clone, &peer_addr).await {
+                            Ok(mut conn) => {
+                                match Self::write_packet(conn.stream_mut(), &accept_packet).await {
+                                    Ok(_) => info!(joiner = %joiner_onion, "Sent join accept to joiner"),
+                                    Err(e) => warn!(error = %e, joiner = %joiner_onion, "Failed to send join accept"),
+                                }
+                            }
+                            Err(e) => {
+                                warn!(error = %e, joiner = %joiner_onion, "Failed to connect to joiner for accept");
+                            }
+                        }
                     });
                 }
                 Err(e) => {
@@ -2620,6 +2999,11 @@ impl MessagingDaemon {
     async fn handle_group_join_accept_packet(
         packet: &Packet,
         event_tx: &broadcast::Sender<DaemonEvent>,
+        group_sessions: &Arc<RwLock<HashMap<[u8; 32], crate::messaging::group_session::GroupSession>>>,
+        identity: &TorIdentity,
+        database: &Arc<TokioMutex<Database>>,
+        user_id: i64,
+        pending_join_invites: &Arc<RwLock<HashMap<[u8; 32], crate::protocol::GroupInvitePayload>>>,
     ) -> Result<()> {
         let payload = crate::protocol::GroupJoinAcceptPayload::from_bytes(&packet.payload)?;
 
@@ -2630,18 +3014,95 @@ impl MessagingDaemon {
             "Received group join accept"
         );
 
-        // Emit event for application layer to complete join
-        let _ = event_tx.send(DaemonEvent::GroupJoinAcceptReceived {
-            group_id: payload.group_id,
-            epoch_number: payload.epoch_number,
-            encrypted_epoch_key: payload.current_epoch_key,
-            member_list: payload.member_list.unwrap_or_default(),
-        });
+        // Look up the original invite we stored when sending the join request
+        let invite = {
+            let mut invites = pending_join_invites.write().await;
+            invites.remove(&payload.group_id)
+        };
 
-        info!(
-            group_id = ?payload.group_id,
-            "Join accept received, ready to initialize group session"
+        let invite = match invite {
+            Some(inv) => inv,
+            None => {
+                warn!(
+                    group_id = ?payload.group_id,
+                    "Received join accept but no pending invite found"
+                );
+                // Still emit event for tracking
+                let _ = event_tx.send(DaemonEvent::GroupJoinAcceptReceived {
+                    group_id: payload.group_id,
+                    epoch_number: payload.epoch_number,
+                    encrypted_epoch_key: payload.current_epoch_key,
+                    member_list: payload.member_list.unwrap_or_default(),
+                });
+                return Ok(());
+            }
+        };
+
+        // Create a founder member from the invite's inviter pubkey
+        let founder_member_id = crate::crypto::generate_member_id(
+            &payload.group_id,
+            &invite.inviter_pubkey,
         );
+        let founder_member = crate::protocol::GroupMember {
+            member_id: founder_member_id,
+            onion_address: Some(invite.bootstrap_peer.clone()),
+            pubkey: invite.inviter_pubkey,
+            is_admin: true,
+            joined_at: chrono::Utc::now().timestamp(),
+        };
+
+        // Create the group session
+        match crate::messaging::group_session::GroupSession::join_via_invite(
+            invite,
+            identity,
+            &payload.current_epoch_key,
+            payload.epoch_number,
+            founder_member,
+        ) {
+            Ok(session) => {
+                let group_name = session.name.clone();
+                let group_id = session.id;
+
+                // Store group in database
+                {
+                    let db = database.lock().await;
+                    if let Err(e) = db.store_group(&session) {
+                        warn!(error = %e, "Failed to store joined group in database");
+                    }
+                    // Store members
+                    for member in session.members.values() {
+                        if let Err(e) = db.store_group_member(&group_id, member) {
+                            warn!(error = %e, "Failed to store group member");
+                        }
+                    }
+                }
+
+                // Add session to active group sessions
+                group_sessions.write().await.insert(group_id, session);
+
+                // Emit GroupJoined event
+                let _ = event_tx.send(DaemonEvent::GroupJoined {
+                    group_id,
+                    name: group_name.clone(),
+                });
+
+                info!(
+                    group_id = ?group_id,
+                    name = %group_name,
+                    "Successfully joined group"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    group_id = ?payload.group_id,
+                    error = %e,
+                    "Failed to create group session from join accept"
+                );
+                let _ = event_tx.send(DaemonEvent::Error {
+                    message: format!("Failed to join group: {}", e),
+                });
+            }
+        }
 
         Ok(())
     }

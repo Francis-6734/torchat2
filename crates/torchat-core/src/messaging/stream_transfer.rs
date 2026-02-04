@@ -391,7 +391,7 @@ pub fn get_magic_bytes() -> &'static [u8; 8] {
 }
 
 /// Compute SHA-256 hash of a file.
-async fn compute_file_hash(path: &PathBuf) -> Result<[u8; 32]> {
+pub async fn compute_file_hash(path: &PathBuf) -> Result<[u8; 32]> {
     use sha2::{Sha256, Digest};
 
     let mut file = File::open(path).await?;
@@ -419,6 +419,213 @@ fn sanitize_filename(name: &str) -> String {
     } else {
         name.to_string()
     }
+}
+
+// ==========================================
+// File Request Protocol (downloader-initiated)
+// ==========================================
+
+/// Magic bytes to identify file request streams (downloader connects to sender).
+const FILE_REQUEST_MAGIC: &[u8; 8] = b"TCFR0001";
+
+/// File request metadata sent by the downloader.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FileRequestMetadata {
+    /// The file ID to request.
+    pub file_id: String,
+}
+
+/// Check if incoming data starts with file request magic.
+pub fn is_file_request_magic(data: &[u8]) -> bool {
+    data.len() >= 8 && &data[..8] == FILE_REQUEST_MAGIC
+}
+
+/// Request a file from a peer (downloader connects to sender).
+///
+/// The downloader connects to the sender, sends the file request magic and file_id,
+/// then receives the file using the same format as `receive_file_stream`.
+pub async fn request_file_from_peer(
+    file_id: &str,
+    sender_address: &str,
+    output_dir: PathBuf,
+    tor_config: &TorConnectionConfig,
+) -> Result<TransferResult> {
+    let peer_addr = OnionAddress::from_string(sender_address)
+        .map_err(|_| Error::Protocol("Invalid sender address".into()))?;
+
+    info!(sender = %sender_address, file_id = %file_id, "Requesting file from peer");
+
+    // Connect to sender via Tor
+    let mut conn = TorConnection::connect(tor_config, &peer_addr).await?;
+    let stream = conn.stream_mut();
+
+    // Send file request magic
+    stream.write_all(FILE_REQUEST_MAGIC).await
+        .map_err(|e| Error::Tor(format!("Failed to write request magic: {}", e)))?;
+
+    // Send request metadata
+    let request_meta = FileRequestMetadata {
+        file_id: file_id.to_string(),
+    };
+    let request_bytes = bincode::serialize(&request_meta)
+        .map_err(|e| Error::Encoding(format!("Failed to serialize request: {}", e)))?;
+
+    let request_len = request_bytes.len() as u32;
+    stream.write_all(&request_len.to_be_bytes()).await
+        .map_err(|e| Error::Tor(format!("Failed to write request length: {}", e)))?;
+    stream.write_all(&request_bytes).await
+        .map_err(|e| Error::Tor(format!("Failed to write request: {}", e)))?;
+    stream.flush().await
+        .map_err(|e| Error::Tor(format!("Failed to flush: {}", e)))?;
+
+    info!(file_id = %file_id, "Request sent, waiting for file stream...");
+
+    // Now receive the file using the same format as receive_file_stream
+    // The sender will send: metadata_len(4) + metadata + file_data
+    receive_file_stream(stream, output_dir).await
+}
+
+/// Handle an incoming file request (sender side).
+///
+/// Called when the listener detects FILE_REQUEST_MAGIC. Reads the requested file_id,
+/// looks up the file in the staged files map, and streams it back.
+pub async fn handle_file_request(
+    stream: &mut tokio::net::TcpStream,
+    staged_files: &std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, PathBuf>>>,
+    our_address: &str,
+) -> Result<()> {
+    info!("Handling incoming file request");
+
+    // Read request metadata length
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).await
+        .map_err(|e| Error::Tor(format!("Failed to read request length: {}", e)))?;
+
+    let request_len = u32::from_be_bytes(len_buf) as usize;
+    if request_len > MAX_METADATA_SIZE {
+        return Err(Error::Protocol("Request metadata too large".into()));
+    }
+
+    // Read request metadata
+    let mut request_buf = vec![0u8; request_len];
+    stream.read_exact(&mut request_buf).await
+        .map_err(|e| Error::Tor(format!("Failed to read request: {}", e)))?;
+
+    let request: FileRequestMetadata = bincode::deserialize(&request_buf)
+        .map_err(|e| Error::Encoding(format!("Failed to parse request: {}", e)))?;
+
+    info!(file_id = %request.file_id, "File requested");
+
+    // Look up file in staged files
+    let file_path = {
+        let files = staged_files.read().await;
+        files.get(&request.file_id).cloned()
+    };
+
+    let file_path = match file_path {
+        Some(path) => path,
+        None => {
+            warn!(file_id = %request.file_id, "Requested file not found in staged files");
+            return Err(Error::Protocol("File not found".into()));
+        }
+    };
+
+    // Verify file exists on disk
+    if !file_path.exists() {
+        warn!(file_id = %request.file_id, path = ?file_path, "Staged file no longer exists on disk");
+        return Err(Error::Protocol("File no longer available".into()));
+    }
+
+    // Read file metadata
+    let file = File::open(&file_path).await?;
+    let file_metadata = file.metadata().await?;
+    let file_size = file_metadata.len();
+
+    let filename = file_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+
+    // Remove the file_id prefix from filename if present (stored as <file_id>_<filename>)
+    let display_filename = if let Some(idx) = filename.find('_') {
+        filename[idx + 1..].to_string()
+    } else {
+        filename.clone()
+    };
+
+    let hash = compute_file_hash(&file_path).await?;
+    let transfer_id = crate::crypto::random_bytes::<16>();
+
+    let metadata = StreamFileMetadata {
+        transfer_id,
+        filename: display_filename.clone(),
+        size: file_size,
+        hash,
+        sender_address: our_address.to_string(),
+    };
+
+    // Send metadata
+    let metadata_bytes = bincode::serialize(&metadata)
+        .map_err(|e| Error::Encoding(format!("Failed to serialize metadata: {}", e)))?;
+
+    let metadata_len = metadata_bytes.len() as u32;
+    stream.write_all(&metadata_len.to_be_bytes()).await
+        .map_err(|e| Error::Tor(format!("Failed to write metadata length: {}", e)))?;
+    stream.write_all(&metadata_bytes).await
+        .map_err(|e| Error::Tor(format!("Failed to write metadata: {}", e)))?;
+    stream.flush().await
+        .map_err(|e| Error::Tor(format!("Failed to flush: {}", e)))?;
+
+    info!(file_id = %request.file_id, filename = %display_filename, size = file_size, "Streaming file to requester");
+
+    // Stream file data
+    let mut file = File::open(&file_path).await?;
+    let mut buffer = vec![0u8; STREAM_CHUNK_SIZE];
+    let mut bytes_sent: u64 = 0;
+
+    loop {
+        let n = file.read(&mut buffer).await?;
+        if n == 0 {
+            break;
+        }
+
+        stream.write_all(&buffer[..n]).await
+            .map_err(|e| Error::Tor(format!("Failed to write chunk: {}", e)))?;
+
+        bytes_sent += n as u64;
+
+        if bytes_sent % (1024 * 1024) == 0 || bytes_sent == file_size {
+            debug!(
+                file_id = %request.file_id,
+                sent = bytes_sent,
+                total = file_size,
+                percent = (bytes_sent * 100 / file_size.max(1)),
+                "File request transfer progress"
+            );
+        }
+    }
+
+    stream.flush().await
+        .map_err(|e| Error::Tor(format!("Failed to flush: {}", e)))?;
+
+    // Wait for acknowledgment
+    let mut ack = [0u8; 1];
+    let ack_result = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        stream.read_exact(&mut ack),
+    ).await;
+
+    match ack_result {
+        Ok(Ok(_)) if ack[0] == 0x01 => {
+            info!(file_id = %request.file_id, "File served successfully (ack received)");
+        }
+        _ => {
+            warn!(file_id = %request.file_id, "No success ack received for file request");
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

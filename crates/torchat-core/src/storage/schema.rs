@@ -1,7 +1,7 @@
 //! Database schema definitions.
 
 /// Schema version for migrations.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// SQL to create the database schema.
 pub const CREATE_SCHEMA: &str = r#"
@@ -201,6 +201,25 @@ CREATE TABLE IF NOT EXISTS pending_group_invites (
 
 CREATE INDEX IF NOT EXISTS idx_pending_invites_user ON pending_group_invites(user_id);
 CREATE INDEX IF NOT EXISTS idx_pending_invites_status ON pending_group_invites(status);
+
+-- Group shared files table
+CREATE TABLE IF NOT EXISTS group_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_db_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    file_id TEXT NOT NULL UNIQUE,
+    filename TEXT NOT NULL,
+    file_size INTEGER NOT NULL,
+    file_hash BLOB NOT NULL,
+    sender_anon_id BLOB NOT NULL,
+    sender_onion TEXT NOT NULL,
+    local_path TEXT,
+    status TEXT NOT NULL DEFAULT 'available',
+    shared_at INTEGER NOT NULL,
+    downloaded_at INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_group_files_group ON group_files(group_db_id);
+CREATE INDEX IF NOT EXISTS idx_group_files_file_id ON group_files(file_id);
 
 -- Schema version
 INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', ?);

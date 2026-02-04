@@ -20,7 +20,7 @@ mod database;
 mod offline_queue;
 mod schema;
 
-pub use database::{derive_db_key, Database, DatabaseConfig, PendingGroupInvite, SimpleMessage, UserInfo};
+pub use database::{derive_db_key, Database, DatabaseConfig, GroupFileRecord, PendingGroupInvite, SimpleMessage, UserInfo};
 pub use offline_queue::{OfflineMessage, OfflineQueue, OfflineStatus, QueueStats};
 
 /// Default database filename.

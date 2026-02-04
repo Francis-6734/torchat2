@@ -1272,6 +1272,198 @@ impl Database {
 
         Ok(())
     }
+
+    /// Store a group file metadata entry.
+    pub fn store_group_file(
+        &self,
+        group_id: &[u8; 32],
+        file_id: &str,
+        filename: &str,
+        file_size: u64,
+        file_hash: &[u8; 32],
+        sender_anon_id: &[u8; 16],
+        sender_onion: &str,
+        local_path: Option<&str>,
+        status: &str,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+
+        self.conn
+            .execute(
+                r#"
+                INSERT OR REPLACE INTO group_files
+                (group_db_id, file_id, filename, file_size, file_hash, sender_anon_id, sender_onion, local_path, status, shared_at)
+                VALUES (
+                    (SELECT id FROM groups WHERE group_id = ?),
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                "#,
+                params![
+                    group_id.as_slice(),
+                    file_id,
+                    filename,
+                    file_size as i64,
+                    file_hash.as_slice(),
+                    sender_anon_id.as_slice(),
+                    sender_onion,
+                    local_path,
+                    status,
+                    now,
+                ],
+            )
+            .map_err(|e| Error::Storage(format!("failed to store group file: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Load files shared in a group.
+    pub fn load_group_files(&self, group_id: &[u8; 32], limit: u32) -> Result<Vec<GroupFileRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                r#"
+                SELECT file_id, filename, file_size, file_hash, sender_anon_id, sender_onion, local_path, status, shared_at, downloaded_at
+                FROM group_files
+                WHERE group_db_id = (SELECT id FROM groups WHERE group_id = ?)
+                ORDER BY shared_at DESC
+                LIMIT ?
+                "#,
+            )
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(params![group_id.as_slice(), limit], |row| {
+                let file_id: String = row.get(0)?;
+                let filename: String = row.get(1)?;
+                let file_size: i64 = row.get(2)?;
+                let file_hash: Vec<u8> = row.get(3)?;
+                let sender_anon_id: Vec<u8> = row.get(4)?;
+                let sender_onion: String = row.get(5)?;
+                let local_path: Option<String> = row.get(6)?;
+                let status: String = row.get(7)?;
+                let shared_at: i64 = row.get(8)?;
+                let downloaded_at: Option<i64> = row.get(9)?;
+                Ok((file_id, filename, file_size, file_hash, sender_anon_id, sender_onion, local_path, status, shared_at, downloaded_at))
+            })
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let mut files = Vec::new();
+        for row in rows {
+            let (file_id, filename, file_size, file_hash_bytes, sender_anon_id_bytes, sender_onion, local_path, status, shared_at, downloaded_at) =
+                row.map_err(|e| Error::Storage(e.to_string()))?;
+
+            let mut file_hash = [0u8; 32];
+            if file_hash_bytes.len() == 32 {
+                file_hash.copy_from_slice(&file_hash_bytes);
+            }
+
+            let mut sender_anon_id = [0u8; 16];
+            if sender_anon_id_bytes.len() == 16 {
+                sender_anon_id.copy_from_slice(&sender_anon_id_bytes);
+            }
+
+            files.push(GroupFileRecord {
+                file_id,
+                filename,
+                file_size: file_size as u64,
+                file_hash,
+                sender_anon_id,
+                sender_onion,
+                local_path,
+                status,
+                shared_at,
+                downloaded_at,
+            });
+        }
+
+        Ok(files)
+    }
+
+    /// Update group file status and optionally the local path.
+    pub fn update_group_file_status(
+        &self,
+        file_id: &str,
+        status: &str,
+        local_path: Option<&str>,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+
+        if let Some(path) = local_path {
+            self.conn
+                .execute(
+                    "UPDATE group_files SET status = ?, local_path = ?, downloaded_at = ? WHERE file_id = ?",
+                    params![status, path, now, file_id],
+                )
+                .map_err(|e| Error::Storage(format!("failed to update group file: {}", e)))?;
+        } else {
+            self.conn
+                .execute(
+                    "UPDATE group_files SET status = ? WHERE file_id = ?",
+                    params![status, file_id],
+                )
+                .map_err(|e| Error::Storage(format!("failed to update group file: {}", e)))?;
+        }
+
+        Ok(())
+    }
+
+    /// Get a single group file record by file_id.
+    pub fn get_group_file(&self, file_id: &str) -> Result<Option<GroupFileRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                r#"
+                SELECT file_id, filename, file_size, file_hash, sender_anon_id, sender_onion, local_path, status, shared_at, downloaded_at
+                FROM group_files
+                WHERE file_id = ?
+                "#,
+            )
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let result = stmt
+            .query_row(params![file_id], |row| {
+                let file_id: String = row.get(0)?;
+                let filename: String = row.get(1)?;
+                let file_size: i64 = row.get(2)?;
+                let file_hash: Vec<u8> = row.get(3)?;
+                let sender_anon_id: Vec<u8> = row.get(4)?;
+                let sender_onion: String = row.get(5)?;
+                let local_path: Option<String> = row.get(6)?;
+                let status: String = row.get(7)?;
+                let shared_at: i64 = row.get(8)?;
+                let downloaded_at: Option<i64> = row.get(9)?;
+                Ok((file_id, filename, file_size, file_hash, sender_anon_id, sender_onion, local_path, status, shared_at, downloaded_at))
+            });
+
+        match result {
+            Ok((file_id, filename, file_size, file_hash_bytes, sender_anon_id_bytes, sender_onion, local_path, status, shared_at, downloaded_at)) => {
+                let mut file_hash = [0u8; 32];
+                if file_hash_bytes.len() == 32 {
+                    file_hash.copy_from_slice(&file_hash_bytes);
+                }
+
+                let mut sender_anon_id = [0u8; 16];
+                if sender_anon_id_bytes.len() == 16 {
+                    sender_anon_id.copy_from_slice(&sender_anon_id_bytes);
+                }
+
+                Ok(Some(GroupFileRecord {
+                    file_id,
+                    filename,
+                    file_size: file_size as u64,
+                    file_hash,
+                    sender_anon_id,
+                    sender_onion,
+                    local_path,
+                    status,
+                    shared_at,
+                    downloaded_at,
+                }))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(Error::Storage(format!("failed to get group file: {}", e))),
+        }
+    }
 }
 
 /// User info for listing.
@@ -1313,6 +1505,33 @@ pub struct PendingGroupInvite {
     pub status: String,
     /// When the invite was received.
     pub received_at: i64,
+}
+
+/// Group file record from database.
+#[derive(Debug, Clone, Serialize)]
+pub struct GroupFileRecord {
+    /// File ID (hex-encoded transfer ID).
+    pub file_id: String,
+    /// Original filename.
+    pub filename: String,
+    /// File size in bytes.
+    pub file_size: u64,
+    /// SHA-256 hash of file content.
+    #[serde(skip)]
+    pub file_hash: [u8; 32],
+    /// Sender's anonymous member ID.
+    #[serde(skip)]
+    pub sender_anon_id: [u8; 16],
+    /// Sender's onion address.
+    pub sender_onion: String,
+    /// Local file path (if we have the file).
+    pub local_path: Option<String>,
+    /// Status: available, downloading, downloaded, failed.
+    pub status: String,
+    /// When the file was shared (Unix timestamp).
+    pub shared_at: i64,
+    /// When the file was downloaded (Unix timestamp).
+    pub downloaded_at: Option<i64>,
 }
 
 /// Simple message for web interface.

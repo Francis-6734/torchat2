@@ -278,6 +278,36 @@ async function loadGroupMessages(groupId, isPolling = false) {
                 const isOurs = msg.outgoing;
                 const senderLabel = isOurs ? 'You' : (msg.sender_id.substring(0, 8) + '...');
 
+                // Check if this is a file metadata message
+                if (msg.content.startsWith('[FILE_META]')) {
+                    try {
+                        const meta = JSON.parse(msg.content.substring('[FILE_META]'.length));
+                        const sizeStr = formatFileSize(meta.size);
+                        const downloadBtn = !isOurs
+                            ? `<button class="file-download-btn" onclick="downloadGroupFile('${groupId}', '${meta.file_id}', '${escapeHtml(meta.filename)}', this)">Download</button>`
+                            : `<button class="file-download-btn" disabled>Shared</button>`;
+
+                        return `
+                            <div class="message ${isOurs ? 'sent' : 'received'}">
+                                <div class="message-bubble">
+                                    ${!isOurs ? `<div class="message-sender">${senderLabel}</div>` : ''}
+                                    <div class="file-message">
+                                        <div class="file-icon">&#128206;</div>
+                                        <div class="file-info">
+                                            <div class="file-name">${escapeHtml(meta.filename)}</div>
+                                            <div class="file-size">${sizeStr}</div>
+                                        </div>
+                                        ${downloadBtn}
+                                    </div>
+                                    <div class="message-time">${formatTime(msg.timestamp)}</div>
+                                </div>
+                            </div>
+                        `;
+                    } catch (e) {
+                        // Fall through to plain text rendering
+                    }
+                }
+
                 return `
                     <div class="message ${isOurs ? 'sent' : 'received'}">
                         <div class="message-bubble">
@@ -340,6 +370,162 @@ async function sendGroupMessage() {
     msgEl.querySelector('.message-time').textContent = result.success ? 'Sent' : 'Failed';
     if (!result.success) {
         showToast('Failed to send: ' + (result.error || 'Unknown error'));
+    }
+}
+
+// ========================================
+// Group File Sharing
+// ========================================
+
+async function handleGroupFileSelect(event) {
+    const file = event.target.files[0];
+    if (!file || !currentGroup) {
+        showToast('Open a group chat first');
+        event.target.value = '';
+        return;
+    }
+
+    const MAX_SIZE = 5 * 1024 * 1024 * 1024;
+    if (file.size > MAX_SIZE) {
+        showToast('File size exceeds 5GB limit');
+        event.target.value = '';
+        return;
+    }
+
+    // Show upload progress in chat
+    const container = document.getElementById('group-messages-container');
+    const emptyState = container.querySelector('.empty-state');
+    if (emptyState) emptyState.remove();
+
+    const fileEl = document.createElement('div');
+    fileEl.className = 'message sent';
+    fileEl.innerHTML = `
+        <div class="message-bubble">
+            <div class="file-message">
+                <div class="file-icon">&#128206;</div>
+                <div class="file-info">
+                    <div class="file-name">${escapeHtml(file.name)}</div>
+                    <div class="file-size">${formatFileSize(file.size)}</div>
+                    <div class="file-progress"><div class="file-progress-bar" style="width: 0%"></div></div>
+                </div>
+            </div>
+            <div class="message-time">Uploading...</div>
+        </div>
+    `;
+    container.appendChild(fileEl);
+    container.scrollTop = container.scrollHeight;
+
+    const progressBar = fileEl.querySelector('.file-progress-bar');
+    const timeEl = fileEl.querySelector('.message-time');
+
+    try {
+        const formData = new FormData();
+        formData.append('filename', file.name);
+        formData.append('file', file);
+
+        progressBar.style.width = '30%';
+
+        const response = await fetch(
+            `/api/groups/${currentGroup.id}/files/upload`,
+            { method: 'POST', body: formData }
+        );
+
+        progressBar.style.width = '70%';
+        const result = await response.json();
+
+        if (result.success) {
+            progressBar.style.width = '100%';
+            timeEl.textContent = 'Shared';
+            showToast(`File "${file.name}" shared with group!`);
+            // Reload messages to show the file metadata message
+            setTimeout(() => loadGroupMessages(currentGroup.id, true), 2000);
+        } else {
+            progressBar.style.width = '0%';
+            progressBar.style.backgroundColor = '#ff4444';
+            timeEl.textContent = 'Failed';
+            showToast('Failed: ' + (result.error || 'Unknown error'));
+        }
+    } catch (error) {
+        progressBar.style.width = '0%';
+        progressBar.style.backgroundColor = '#ff4444';
+        timeEl.textContent = 'Error';
+        showToast('Error: ' + error.message);
+    }
+
+    event.target.value = '';
+}
+
+async function downloadGroupFile(groupId, fileId, filename, btnEl) {
+    if (btnEl) {
+        btnEl.disabled = true;
+        btnEl.textContent = 'Downloading...';
+    }
+
+    try {
+        const result = await api(`/api/groups/${groupId}/files/${fileId}/download`, 'POST');
+
+        if (result.success) {
+            const responseData = result.data;
+            // If already downloaded, serve it directly
+            if (typeof responseData === 'string' && responseData.startsWith('already_downloaded:')) {
+                // Serve the file
+                window.open(`/api/groups/${groupId}/files/${fileId}/serve`, '_blank');
+                if (btnEl) {
+                    btnEl.textContent = 'Open';
+                    btnEl.disabled = false;
+                    btnEl.onclick = function() { window.open(`/api/groups/${groupId}/files/${fileId}/serve`, '_blank'); };
+                }
+            } else {
+                showToast(`Downloading "${filename}" from sender...`);
+                if (btnEl) btnEl.textContent = 'In progress...';
+
+                // Poll for completion
+                let attempts = 0;
+                const pollInterval = setInterval(async () => {
+                    attempts++;
+                    const filesResult = await api(`/api/groups/${groupId}/files`);
+                    if (filesResult.success && filesResult.data) {
+                        const file = filesResult.data.find(f => f.file_id === fileId);
+                        if (file && file.status === 'downloaded') {
+                            clearInterval(pollInterval);
+                            showToast(`"${filename}" downloaded!`);
+                            window.open(`/api/groups/${groupId}/files/${fileId}/serve`, '_blank');
+                            if (btnEl) {
+                                btnEl.textContent = 'Open';
+                                btnEl.disabled = false;
+                                btnEl.onclick = function() { window.open(`/api/groups/${groupId}/files/${fileId}/serve`, '_blank'); };
+                            }
+                        } else if (file && file.status === 'failed') {
+                            clearInterval(pollInterval);
+                            showToast(`Download of "${filename}" failed`);
+                            if (btnEl) {
+                                btnEl.textContent = 'Retry';
+                                btnEl.disabled = false;
+                            }
+                        }
+                    }
+                    if (attempts > 60) { // 5 minutes timeout
+                        clearInterval(pollInterval);
+                        if (btnEl) {
+                            btnEl.textContent = 'Retry';
+                            btnEl.disabled = false;
+                        }
+                    }
+                }, 5000);
+            }
+        } else {
+            showToast('Download failed: ' + (result.error || 'Unknown error'));
+            if (btnEl) {
+                btnEl.textContent = 'Retry';
+                btnEl.disabled = false;
+            }
+        }
+    } catch (error) {
+        showToast('Error: ' + error.message);
+        if (btnEl) {
+            btnEl.textContent = 'Retry';
+            btnEl.disabled = false;
+        }
     }
 }
 

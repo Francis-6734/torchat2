@@ -214,6 +214,7 @@ async fn main() -> anyhow::Result<()> {
     let file_upload_routes = Router::new()
         .route("/api/files/send", post(api::send_file))
         .route("/api/files/upload", post(api::send_file_multipart))
+        .route("/api/groups/:group_id/files/upload", post(api::send_group_file_multipart))
         .layer(RequestBodyLimitLayer::new(FILE_UPLOAD_BODY_LIMIT));
 
     // Build router with security middleware
@@ -257,6 +258,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/groups/:group_id/invite", post(api::send_group_invite))
         .route("/api/groups/:group_id/messages", get(api::get_group_messages).post(api::send_group_message))
         .route("/api/groups/:group_id/leave", post(api::leave_group))
+        // Group file sharing
+        .route("/api/groups/:group_id/files", get(api::list_group_files))
+        .route("/api/groups/:group_id/files/:file_id/download", post(api::download_group_file))
+        .route("/api/groups/:group_id/files/:file_id/serve", get(api::serve_group_file))
         // Pending group invites
         .route("/api/invites", get(api::list_pending_invites))
         .route("/api/invites/:invite_id/accept", post(api::accept_pending_invite))

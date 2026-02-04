@@ -2831,3 +2831,440 @@ pub async fn decline_pending_invite(
         Json(ApiResponse::ok("Invite declined".to_string())),
     )
 }
+
+// ==========================================
+// Group File Transfer Endpoints
+// ==========================================
+
+/// Upload and share a file in a group chat
+pub async fn send_group_file_multipart(
+    headers: HeaderMap,
+    Path(group_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> (StatusCode, Json<ApiResponse<FileTransferResponse>>) {
+    let (user_id, _identity, _) = match get_current_user(&headers, &state).await {
+        Ok(user) => user,
+        Err((status, json)) => {
+            return (status, Json(ApiResponse {
+                success: false,
+                data: None,
+                error: json.0.error,
+            }));
+        }
+    };
+
+    // Parse group_id
+    let group_id_bytes = match hex::decode(&group_id) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid group ID".to_string()),
+                }),
+            );
+        }
+    };
+
+    // Get daemon
+    let daemons = state.daemons.lock().await;
+    let daemon = match daemons.get(&user_id) {
+        Some(d) => d.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Daemon not running".to_string()),
+                }),
+            );
+        }
+    };
+    drop(daemons);
+
+    let mut filename: Option<String> = None;
+    let mut file_data: Option<Vec<u8>> = None;
+
+    // Process multipart fields
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let field_name: String = field.name().unwrap_or("").to_string();
+        match field_name.as_str() {
+            "filename" => {
+                if let Ok(value) = field.text().await {
+                    filename = Some(value);
+                }
+            }
+            "file" => {
+                if filename.is_none() {
+                    filename = field.file_name().map(|s: &str| s.to_string());
+                }
+                match field.bytes().await {
+                    Ok(bytes) => {
+                        file_data = Some(bytes.to_vec());
+                    }
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(ApiResponse {
+                                success: false,
+                                data: None,
+                                error: Some(format!("Failed to read file data: {}", e)),
+                            }),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let filename = match filename {
+        Some(name) => name,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Missing filename".to_string()),
+                }),
+            );
+        }
+    };
+
+    let file_data = match file_data {
+        Some(data) => data,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Missing file data".to_string()),
+                }),
+            );
+        }
+    };
+
+    if file_data.len() as u64 > MAX_FILE_SIZE {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some("File size exceeds 5GB limit".to_string()),
+            }),
+        );
+    }
+
+    let file_size = file_data.len() as u64;
+
+    // Save to temp file
+    let temp_dir = std::env::temp_dir();
+    let temp_filename = format!("torchat_group_upload_{}", uuid::Uuid::new_v4());
+    let temp_path = temp_dir.join(&temp_filename);
+
+    if let Err(e) = std::fs::write(&temp_path, &file_data) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Failed to save file: {}", e)),
+            }),
+        );
+    }
+
+    // Send command to daemon
+    use torchat_core::messaging::DaemonCommand;
+    if let Err(e) = daemon.command_sender().send(DaemonCommand::SendGroupFile {
+        group_id: group_id_bytes,
+        file_path: temp_path,
+        filename: filename.clone(),
+    }).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Failed to share file: {}", e)),
+            }),
+        );
+    }
+
+    info!(user_id, group_id = %group_id, filename = %filename, size = file_size, "Group file upload initiated");
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse::ok(FileTransferResponse {
+            transfer_id: "group_upload".to_string(),
+            filename,
+            size: file_size,
+            status: "sharing".to_string(),
+            progress: 0.0,
+        })),
+    )
+}
+
+/// List files shared in a group
+pub async fn list_group_files(
+    headers: HeaderMap,
+    Path(group_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<ApiResponse<Vec<GroupFileInfo>>>) {
+    let (user_id, identity, _) = match get_current_user(&headers, &state).await {
+        Ok(user) => user,
+        Err((status, json)) => {
+            return (status, Json(ApiResponse {
+                success: false,
+                data: None,
+                error: json.0.error,
+            }));
+        }
+    };
+
+    // Parse group_id
+    let group_id_bytes = match hex::decode(&group_id) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid group ID".to_string()),
+                }),
+            );
+        }
+    };
+
+    let db = state.database.lock().await;
+    let files = match db.load_group_files(&group_id_bytes, 100) {
+        Ok(f) => f,
+        Err(e) => {
+            warn!(user_id, error = %e, "Failed to load group files");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Failed to load files".to_string()),
+                }),
+            );
+        }
+    };
+
+    let our_onion = identity.onion_address().to_string();
+    let file_infos: Vec<GroupFileInfo> = files.iter().map(|f| {
+        GroupFileInfo {
+            file_id: f.file_id.clone(),
+            filename: f.filename.clone(),
+            size: f.file_size,
+            sender_id: hex::encode(f.sender_anon_id),
+            sender_onion: f.sender_onion.clone(),
+            status: f.status.clone(),
+            shared_at: f.shared_at,
+            is_ours: f.sender_onion == our_onion,
+        }
+    }).collect();
+
+    (StatusCode::OK, Json(ApiResponse::ok(file_infos)))
+}
+
+/// Request download of a group file
+pub async fn download_group_file(
+    headers: HeaderMap,
+    Path((group_id, file_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<ApiResponse<String>>) {
+    let (user_id, _identity, _) = match get_current_user(&headers, &state).await {
+        Ok(user) => user,
+        Err((status, json)) => {
+            return (status, Json(ApiResponse {
+                success: false,
+                data: None,
+                error: json.0.error,
+            }));
+        }
+    };
+
+    let group_id_bytes = match hex::decode(&group_id) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid group ID".to_string()),
+                }),
+            );
+        }
+    };
+
+    // Look up file in database
+    let db = state.database.lock().await;
+    let file_record = match db.get_group_file(&file_id) {
+        Ok(Some(f)) => f,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("File not found".to_string()),
+                }),
+            );
+        }
+        Err(e) => {
+            warn!(user_id, error = %e, "Failed to get group file");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Database error".to_string()),
+                }),
+            );
+        }
+    };
+    drop(db);
+
+    // If already downloaded, return the local path
+    if file_record.status == "downloaded" {
+        if let Some(ref path) = file_record.local_path {
+            if std::path::Path::new(path).exists() {
+                return (
+                    StatusCode::OK,
+                    Json(ApiResponse::ok(format!("already_downloaded:{}", path))),
+                );
+            }
+        }
+    }
+
+    // Get daemon to send download command
+    let daemons = state.daemons.lock().await;
+    let daemon = match daemons.get(&user_id) {
+        Some(d) => d.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Daemon not running".to_string()),
+                }),
+            );
+        }
+    };
+    drop(daemons);
+
+    use torchat_core::messaging::DaemonCommand;
+    if let Err(e) = daemon.command_sender().send(DaemonCommand::DownloadGroupFile {
+        group_id: group_id_bytes,
+        file_id: file_id.clone(),
+        sender_onion: file_record.sender_onion.clone(),
+    }).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Failed to start download: {}", e)),
+            }),
+        );
+    }
+
+    info!(user_id, file_id = %file_id, "Group file download initiated");
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse::ok("Download started".to_string())),
+    )
+}
+
+/// Serve a downloaded group file
+pub async fn serve_group_file(
+    headers: HeaderMap,
+    Path((_group_id, file_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    let (_user_id, _identity, _) = match get_current_user(&headers, &state).await {
+        Ok(user) => user,
+        Err(_) => {
+            return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+        }
+    };
+
+    // Look up file in database
+    let db = state.database.lock().await;
+    let file_record = match db.get_group_file(&file_id) {
+        Ok(Some(f)) => f,
+        _ => {
+            return (StatusCode::NOT_FOUND, "File not found").into_response();
+        }
+    };
+    drop(db);
+
+    // Check if we have the file locally
+    let local_path = match file_record.local_path {
+        Some(ref p) if std::path::Path::new(p).exists() => p.clone(),
+        _ => {
+            return (StatusCode::NOT_FOUND, "File not available locally").into_response();
+        }
+    };
+
+    // Read file and serve it
+    let file_bytes = match tokio::fs::read(&local_path).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read file").into_response();
+        }
+    };
+
+    // Determine content type from extension
+    let content_type = match std::path::Path::new(&file_record.filename)
+        .extension()
+        .and_then(|ext| ext.to_str())
+    {
+        Some("pdf") => "application/pdf",
+        Some("txt") => "text/plain",
+        Some("html") | Some("htm") => "text/html",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("png") => "image/png",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("mp3") => "audio/mpeg",
+        Some("wav") => "audio/wav",
+        Some("mp4") => "video/mp4",
+        Some("webm") => "video/webm",
+        _ => "application/octet-stream",
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", file_record.filename),
+        )
+        .header(header::CONTENT_LENGTH, file_bytes.len().to_string())
+        .body(Body::from(file_bytes))
+        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Server error").into_response())
+}

@@ -172,6 +172,19 @@ pub struct SendGroupMessageRequest {
     pub content: String,
 }
 
+/// Group file information for API responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupFileInfo {
+    pub file_id: String,
+    pub filename: String,
+    pub size: u64,
+    pub sender_id: String,
+    pub sender_onion: String,
+    pub status: String,
+    pub shared_at: i64,
+    pub is_ours: bool,
+}
+
 /// Pending group invite information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingInviteInfo {

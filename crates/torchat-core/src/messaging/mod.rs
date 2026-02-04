@@ -29,7 +29,8 @@ pub use file_transfer::{
 };
 pub use stream_transfer::{
     send_file_stream, receive_file_stream, is_file_transfer_magic,
-    StreamFileMetadata, TransferResult, MAX_FILE_SIZE,
+    request_file_from_peer, handle_file_request, is_file_request_magic,
+    compute_file_hash, StreamFileMetadata, TransferResult, MAX_FILE_SIZE,
 };
 pub use message::{Message, MessageContent, MessageId, MessageStatus};
 pub use relay::{

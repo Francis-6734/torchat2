@@ -496,6 +496,25 @@
             transition: width 0.3s;
         }
 
+        .file-download-btn {
+            padding: 6px 14px;
+            font-size: 12px;
+            border-radius: 16px;
+            background: #5865f2;
+            color: white;
+            border: none;
+            cursor: pointer;
+            margin-left: 8px;
+            white-space: nowrap;
+        }
+        .file-download-btn:hover {
+            background: #4752c4;
+        }
+        .file-download-btn:disabled {
+            background: #555;
+            cursor: not-allowed;
+        }
+
         /* Settings Panel */
         .settings-panel {
             padding: 16px;
@@ -941,6 +960,8 @@
                 </div>
                 <div class="messages-container" id="group-messages-container"></div>
                 <div class="input-area">
+                    <input type="file" id="group-file-input" style="display: none;" onchange="handleGroupFileSelect(event)">
+                    <button class="attach-btn" onclick="document.getElementById('group-file-input').click()" title="Share file">&#128206;</button>
                     <textarea class="message-input" id="group-message-input" placeholder="Type a message..." rows="1"></textarea>
                     <button class="send-btn" onclick="sendGroupMessage()">&#10148;</button>
                 </div>
