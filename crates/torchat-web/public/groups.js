@@ -112,6 +112,17 @@ async function declineInvite(inviteId) {
 // Group Management
 // ========================================
 
+function getRoleBadge(role) {
+    switch (role) {
+        case 'founder':
+            return '<span class="role-badge role-founder">Founder</span>';
+        case 'admin':
+            return '<span class="role-badge role-admin">Admin</span>';
+        default:
+            return '<span class="role-badge role-member">Member</span>';
+    }
+}
+
 async function loadGroups() {
     // Also load pending invites
     loadPendingInvites();
@@ -123,13 +134,16 @@ async function loadGroups() {
 
     if (result.success && result.data && result.data.length > 0) {
         userGroups = result.data;
-        const html = result.data.map(g => `
-            <div class="contact-item" onclick="openGroupChat('${g.group_id}', '${escapeHtml(g.name)}')">
+        const html = result.data.map(g => {
+            const role = g.role || (g.is_founder ? 'founder' : 'member');
+            return `
+            <div class="contact-item" onclick="openGroupChat('${g.group_id}', '${escapeHtml(g.name)}', '${role}')">
                 <div class="contact-name">🔒 ${escapeHtml(g.name)}</div>
                 <div class="contact-address">${g.member_count} member${g.member_count !== 1 ? 's' : ''} • ${g.state}</div>
-                ${g.is_founder ? '<div class="contact-status">Founder</div>' : ''}
+                ${getRoleBadge(role)}
             </div>
-        `).join('');
+        `;
+        }).join('');
         list.innerHTML = html;
 
         if (recentGroups) {
@@ -238,8 +252,8 @@ async function leaveGroup(groupId) {
 // Group Chat
 // ========================================
 
-async function openGroupChat(groupId, groupName) {
-    currentGroup = { id: groupId, name: groupName };
+async function openGroupChat(groupId, groupName, role) {
+    currentGroup = { id: groupId, name: groupName, role: role || 'member' };
     document.getElementById('group-chat-name').textContent = groupName;
     document.getElementById('group-chat-id').textContent = 'Group • ' + groupId.substring(0, 8) + '...';
     document.getElementById('tab-nav').style.display = 'none';
@@ -530,6 +544,101 @@ async function downloadGroupFile(groupId, fileId, filename, btnEl) {
 }
 
 // ========================================
+// Group Member Management
+// ========================================
+
+async function loadGroupMembers(groupId) {
+    const result = await api(`/api/groups/${groupId}/members`);
+    if (result.success && result.data) {
+        return result.data;
+    }
+    return [];
+}
+
+async function promoteToAdmin(groupId, memberId, memberEl) {
+    if (!confirm('Promote this member to admin? Admins can invite new members.')) return;
+
+    if (memberEl) {
+        memberEl.style.opacity = '0.5';
+        memberEl.style.pointerEvents = 'none';
+    }
+
+    const result = await api(`/api/groups/${groupId}/promote`, 'POST', {
+        member_id: memberId
+    });
+
+    if (result.success) {
+        showToast('Member promoted to admin!');
+        // Refresh the member list modal
+        openMembersModal(groupId);
+    } else {
+        if (memberEl) {
+            memberEl.style.opacity = '1';
+            memberEl.style.pointerEvents = 'auto';
+        }
+        showToast('Failed to promote: ' + (result.error || 'Unknown error'));
+    }
+}
+
+async function openMembersModal(groupId) {
+    const members = await loadGroupMembers(groupId);
+    const isFounder = currentGroup && currentGroup.role === 'founder';
+
+    // Remove existing modal if any
+    const existing = document.getElementById('members-modal');
+    if (existing) existing.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'members-modal';
+    modal.className = 'modal open';
+
+    const memberListHtml = members.length > 0
+        ? members.map(m => {
+            const roleLabel = m.role === 'founder'
+                ? '<span class="member-role-tag role-founder">Founder</span>'
+                : m.role === 'admin'
+                    ? '<span class="member-role-tag role-admin">Admin</span>'
+                    : '<span class="member-role-tag role-member">Member</span>';
+
+            const addr = m.onion_address
+                ? m.onion_address.substring(0, 16) + '...'
+                : 'Hidden';
+
+            const promoteBtn = (isFounder && m.role === 'member')
+                ? `<button class="promote-btn" onclick="promoteToAdmin('${groupId}', '${m.member_id}', this.closest('.member-item'))">Make Admin</button>`
+                : '';
+
+            return `
+                <div class="member-item">
+                    <div class="member-info">
+                        <div class="member-addr">${addr}</div>
+                        ${roleLabel}
+                    </div>
+                    ${promoteBtn}
+                </div>
+            `;
+        }).join('')
+        : '<div class="empty-state" style="padding: 20px;">No members found</div>';
+
+    modal.innerHTML = `
+        <div class="modal-content group-menu-modal">
+            <h2 style="color: white; text-shadow: 0 2px 4px rgba(0,0,0,0.3);">Members (${members.length})</h2>
+            <div class="members-list">
+                ${memberListHtml}
+            </div>
+            <button class="btn btn-secondary" style="background: rgba(255,255,255,0.9); color: #333; margin-top: 12px;" onclick="this.closest('.modal').remove()">
+                Close
+            </button>
+        </div>
+    `;
+
+    modal.addEventListener('click', (e) => {
+        if (e.target.classList.contains('modal')) modal.remove();
+    });
+    document.body.appendChild(modal);
+}
+
+// ========================================
 // Modal Functions
 // ========================================
 
@@ -558,14 +667,26 @@ function closeJoinGroupModal() {
 function openGroupMenu() {
     if (!currentGroup) return;
 
+    const canInvite = currentGroup.role === 'founder' || currentGroup.role === 'admin';
+
     const menu = document.createElement('div');
     menu.className = 'modal open';
     menu.innerHTML = `
         <div class="modal-content group-menu-modal">
             <h2 style="color: white; text-shadow: 0 2px 4px rgba(0,0,0,0.3);">🔒 ${escapeHtml(currentGroup.name)}</h2>
+            <div style="margin-bottom: 12px;">${getRoleBadge(currentGroup.role)}</div>
+            <button class="btn" onclick="openMembersModal('${currentGroup.id}'); this.closest('.modal').remove()">
+                👥 View Members
+            </button>
+            ${canInvite ? `
             <button class="btn" onclick="sendGroupInvite('${currentGroup.id}'); this.closest('.modal').remove()">
                 📤 Invite Member
             </button>
+            ` : `
+            <button class="btn" disabled style="opacity: 0.5; cursor: not-allowed;">
+                📤 Invite Member (Founder/Admin only)
+            </button>
+            `}
             <button class="btn btn-secondary" style="background: rgba(255,255,255,0.9); color: #333;" onclick="leaveGroup('${currentGroup.id}'); this.closest('.modal').remove()">
                 🚪 Leave Group
             </button>

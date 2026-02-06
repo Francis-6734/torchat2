@@ -478,6 +478,13 @@ pub enum DaemonCommand {
         /// Sender's onion address.
         sender_onion: String,
     },
+    /// Promote a group member to admin (founder only).
+    PromoteToAdmin {
+        /// Group ID.
+        group_id: [u8; 32],
+        /// Member ID to promote.
+        member_id: [u8; 16],
+    },
 }
 
 /// Peer session state.
@@ -633,7 +640,7 @@ impl MessagingDaemon {
             let db = self.database.lock().await;
             match db.list_groups() {
                 Ok(groups) => {
-                    for (group_id, name, state) in groups {
+                    for (group_id, name, _founder_pubkey, state) in groups {
                         // Load full group metadata
                         match db.load_group_metadata(&group_id) {
                             Ok(Some((name, founder_pubkey, our_member_id, epoch_number, epoch_key, policy, state))) => {
@@ -2146,6 +2153,29 @@ impl MessagingDaemon {
                             }
                         }
                     });
+                }
+                DaemonCommand::PromoteToAdmin { group_id, member_id } => {
+                    let our_pubkey = identity.public_key().to_bytes();
+                    let mut groups = group_sessions.write().await;
+                    if let Some(session) = groups.get_mut(&group_id) {
+                        match session.promote_to_admin(&our_pubkey, &member_id) {
+                            Ok(()) => {
+                                // Persist the admin change to database
+                                if let Err(e) = database.lock().await.update_member_admin_status(&group_id, &member_id, true) {
+                                    warn!(error = %e, "Failed to persist admin promotion to database");
+                                }
+                                info!(group_id = ?group_id, member_id = ?member_id, "Promoted member to admin");
+                            }
+                            Err(e) => {
+                                warn!(group_id = ?group_id, member_id = ?member_id, error = %e, "Failed to promote member");
+                                let _ = event_tx.send(DaemonEvent::Error {
+                                    message: format!("Failed to promote member: {}", e),
+                                });
+                            }
+                        }
+                    } else {
+                        warn!(group_id = ?group_id, "Group not found for admin promotion");
+                    }
                 }
             }
         }

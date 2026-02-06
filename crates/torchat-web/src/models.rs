@@ -125,6 +125,8 @@ pub struct GroupInfo {
     pub member_count: usize,
     pub state: String,
     pub is_founder: bool,
+    /// Role: "founder", "admin", or "member"
+    pub role: String,
 }
 
 /// Group member information
@@ -134,6 +136,8 @@ pub struct GroupMemberInfo {
     pub onion_address: Option<String>,
     pub is_admin: bool,
     pub joined_at: i64,
+    /// Role: "founder", "admin", or "member"
+    pub role: String,
 }
 
 /// Group message
@@ -170,6 +174,12 @@ pub struct JoinGroupRequest {
 #[derive(Debug, Deserialize)]
 pub struct SendGroupMessageRequest {
     pub content: String,
+}
+
+/// Promote member to admin request
+#[derive(Debug, Deserialize)]
+pub struct PromoteMemberRequest {
+    pub member_id: String, // Hex-encoded 16-byte member ID
 }
 
 /// Group file information for API responses

@@ -292,6 +292,7 @@ impl GroupSession {
         };
 
         // Initialize members with founder
+        let founder_member_id = founder_member.member_id;
         let mut members = HashMap::new();
         members.insert(founder_member.member_id, founder_member.clone());
 
@@ -311,6 +312,10 @@ impl GroupSession {
         let mut mesh = MeshTopology::new(invite.group_id, DEFAULT_NEIGHBOR_COUNT);
         mesh.add_neighbor(founder_member);
 
+        // Set up admins with founder
+        let mut admins = HashSet::new();
+        admins.insert(founder_member_id);
+
         info!(
             group_id = ?invite.group_id,
             name = %group_name,
@@ -329,7 +334,7 @@ impl GroupSession {
             current_epoch_key: epoch_key,
             epoch_history: VecDeque::new(),
             members,
-            admins: HashSet::new(), // Founder admin status managed separately
+            admins,
             mesh,
             gossip: GossipManager::new(invite.group_id, 1000, 10),
             messages: VecDeque::new(),
@@ -486,6 +491,38 @@ impl GroupSession {
     /// Check if a member is an admin.
     pub fn is_admin(&self, member_id: &[u8; 16]) -> bool {
         self.admins.contains(member_id)
+    }
+
+    /// Check if a member is the founder.
+    pub fn is_founder(&self, pubkey: &[u8; 32]) -> bool {
+        self.founder_pubkey == *pubkey
+    }
+
+    /// Promote a member to admin (founder only).
+    pub fn promote_to_admin(&mut self, our_pubkey: &[u8; 32], member_id: &[u8; 16]) -> Result<()> {
+        // Only the founder can promote admins
+        if !self.is_founder(our_pubkey) {
+            return Err(Error::Permission("only the founder can promote admins".into()));
+        }
+
+        if !self.members.contains_key(member_id) {
+            return Err(Error::State("member not found in group".into()));
+        }
+
+        if self.admins.contains(member_id) {
+            return Err(Error::State("member is already an admin".into()));
+        }
+
+        self.admins.insert(*member_id);
+
+        // Update the member's is_admin flag
+        if let Some(member) = self.members.get_mut(member_id) {
+            member.is_admin = true;
+        }
+
+        info!(member_id = ?member_id, "Promoted member to admin");
+
+        Ok(())
     }
 
     /// Get the current epoch key for encryption.

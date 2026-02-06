@@ -258,6 +258,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/groups/:group_id/invite", post(api::send_group_invite))
         .route("/api/groups/:group_id/messages", get(api::get_group_messages).post(api::send_group_message))
         .route("/api/groups/:group_id/leave", post(api::leave_group))
+        .route("/api/groups/:group_id/members", get(api::list_group_members))
+        .route("/api/groups/:group_id/promote", post(api::promote_member))
         // Group file sharing
         .route("/api/groups/:group_id/files", get(api::list_group_files))
         .route("/api/groups/:group_id/files/:file_id/download", post(api::download_group_file))

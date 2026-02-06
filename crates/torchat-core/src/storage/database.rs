@@ -427,27 +427,33 @@ impl Database {
         }
     }
 
-    /// List all groups.
-    pub fn list_groups(&self) -> Result<Vec<([u8; 32], String, GroupState)>> {
+    /// List all groups with founder pubkey.
+    pub fn list_groups(&self) -> Result<Vec<([u8; 32], String, [u8; 32], GroupState)>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT group_id, group_name, state FROM groups ORDER BY group_name")
+            .prepare("SELECT group_id, group_name, founder_pubkey, state FROM groups ORDER BY group_name")
             .map_err(|e| Error::Storage(e.to_string()))?;
 
         let rows = stmt
             .query_map([], |row| {
                 let id_bytes: Vec<u8> = row.get(0)?;
                 let name: String = row.get(1)?;
-                let state_str: String = row.get(2)?;
-                Ok((id_bytes, name, state_str))
+                let founder_bytes: Vec<u8> = row.get(2)?;
+                let state_str: String = row.get(3)?;
+                Ok((id_bytes, name, founder_bytes, state_str))
             })
             .map_err(|e| Error::Storage(e.to_string()))?;
 
         let mut groups = Vec::new();
         for row in rows {
-            let (id_bytes, name, state_str) = row.map_err(|e| Error::Storage(e.to_string()))?;
+            let (id_bytes, name, founder_bytes, state_str) = row.map_err(|e| Error::Storage(e.to_string()))?;
             let mut group_id = [0u8; 32];
             group_id.copy_from_slice(&id_bytes);
+
+            let mut founder_pubkey = [0u8; 32];
+            if founder_bytes.len() == 32 {
+                founder_pubkey.copy_from_slice(&founder_bytes);
+            }
 
             let state = match state_str.as_str() {
                 "active" => GroupState::Active,
@@ -455,10 +461,89 @@ impl Database {
                 _ => GroupState::Archived,
             };
 
-            groups.push((group_id, name, state));
+            groups.push((group_id, name, founder_pubkey, state));
         }
 
         Ok(groups)
+    }
+
+    /// Count members in a group.
+    pub fn count_group_members(&self, group_id: &[u8; 32]) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM group_members WHERE group_id = (SELECT id FROM groups WHERE group_id = ?)",
+                params![group_id.as_slice()],
+                |row| row.get(0),
+            )
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(count as usize)
+    }
+
+    /// Update a member's admin status.
+    pub fn update_member_admin_status(&self, group_id: &[u8; 32], member_id: &[u8; 16], is_admin: bool) -> Result<()> {
+        let updated = self
+            .conn
+            .execute(
+                r#"
+                UPDATE group_members SET is_admin = ?, updated_at = ?
+                WHERE group_id = (SELECT id FROM groups WHERE group_id = ?)
+                AND member_id = ?
+                "#,
+                params![
+                    is_admin as i32,
+                    chrono::Utc::now().timestamp(),
+                    group_id.as_slice(),
+                    member_id.as_slice(),
+                ],
+            )
+            .map_err(|e| Error::Storage(format!("failed to update member admin status: {}", e)))?;
+
+        if updated == 0 {
+            return Err(Error::Storage("member not found".to_string()));
+        }
+        Ok(())
+    }
+
+    /// Store a preliminary group record when accepting an invite (before full join completes).
+    pub fn store_preliminary_group(
+        &self,
+        group_id: &[u8; 32],
+        group_name: &str,
+        founder_pubkey: &[u8; 32],
+        our_member_id: &[u8; 16],
+    ) -> Result<i64> {
+        let now = chrono::Utc::now().timestamp();
+        let default_policy = crate::protocol::GroupPolicy::default();
+        let policy_blob = bincode::serialize(&default_policy)
+            .map_err(|e| Error::Storage(format!("failed to serialize policy: {}", e)))?;
+
+        // Use a zeroed epoch key as placeholder until the real one arrives
+        let placeholder_key = [0u8; 32];
+
+        self.conn
+            .execute(
+                r#"
+                INSERT OR IGNORE INTO groups
+                (group_id, group_name, founder_pubkey, our_member_id, current_epoch_number,
+                 current_epoch_key, epoch_key_updated_at, policy_blob, state, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 0, ?, ?, ?, 'active', ?, ?)
+                "#,
+                params![
+                    group_id.as_slice(),
+                    group_name,
+                    founder_pubkey.as_slice(),
+                    our_member_id.as_slice(),
+                    placeholder_key.as_slice(),
+                    now,
+                    policy_blob,
+                    now,
+                    now,
+                ],
+            )
+            .map_err(|e| Error::Storage(format!("failed to store preliminary group: {}", e)))?;
+
+        Ok(self.conn.last_insert_rowid())
     }
 
     /// Store a group member.

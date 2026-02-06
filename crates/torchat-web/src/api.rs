@@ -1972,6 +1972,7 @@ pub async fn create_group(
             member_count: 1,
             state: "Active".to_string(),
             is_founder: true,
+            role: "founder".to_string(),
         })),
     )
 }
@@ -1998,7 +1999,7 @@ pub async fn send_group_invite(
     };
 
     let db = state.database.lock().await;
-    let (user_id, _identity, _display_name) = match db.get_user_by_session(&session_token) {
+    let (user_id, identity, _display_name) = match db.get_user_by_session(&session_token) {
         Ok(Some(user)) => user,
         _ => {
             return (
@@ -2011,9 +2012,9 @@ pub async fn send_group_invite(
             );
         }
     };
-    drop(db);
 
     if let Err(e) = validate_onion_address(&request.invitee_onion) {
+        drop(db);
         return (
             StatusCode::BAD_REQUEST,
             Json(ApiResponse {
@@ -2031,6 +2032,7 @@ pub async fn send_group_invite(
             arr
         }
         _ => {
+            drop(db);
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ApiResponse {
@@ -2041,6 +2043,35 @@ pub async fn send_group_invite(
             );
         }
     };
+
+    // Check if the current user is the founder or an admin
+    let our_pubkey = identity.public_key().to_bytes();
+    let our_member_id = torchat_core::crypto::generate_member_id(&group_id_bytes, &our_pubkey);
+
+    let is_founder = db.load_group_metadata(&group_id_bytes)
+        .ok()
+        .flatten()
+        .map(|(_, fp, _, _, _, _, _)| fp == our_pubkey)
+        .unwrap_or(false);
+
+    let is_admin = db.load_group_members(&group_id_bytes)
+        .unwrap_or_default()
+        .iter()
+        .any(|m| m.member_id == our_member_id && m.is_admin);
+
+    if !is_founder && !is_admin {
+        drop(db);
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some("Only the founder or admins can invite members".to_string()),
+            }),
+        );
+    }
+
+    drop(db);
 
     let daemons = state.daemons.lock().await;
     let daemon = match daemons.get(&user_id) {
@@ -2189,6 +2220,7 @@ pub async fn join_group(
             member_count: 0,
             state: "Active".to_string(),
             is_founder: false,
+            role: "member".to_string(),
         })),
     )
 }
@@ -2213,7 +2245,7 @@ pub async fn list_groups(
     };
 
     let db = state.database.lock().await;
-    let (user_id, _identity, _display_name) = match db.get_user_by_session(&session_token) {
+    let (user_id, identity, _display_name) = match db.get_user_by_session(&session_token) {
         Ok(Some(user)) => user,
         _ => {
             return (
@@ -2226,6 +2258,8 @@ pub async fn list_groups(
             );
         }
     };
+
+    let our_pubkey = identity.public_key().to_bytes();
 
     let groups = match db.list_groups() {
         Ok(groups) => groups,
@@ -2244,18 +2278,38 @@ pub async fn list_groups(
 
     let group_infos: Vec<GroupInfo> = groups
         .into_iter()
-        .map(|(group_id, name, state)| {
+        .map(|(group_id, name, founder_pubkey, state)| {
             let state_str = match state {
                 torchat_core::messaging::GroupState::Active => "Active",
                 torchat_core::messaging::GroupState::Archived => "Archived",
             };
 
+            let member_count = db.count_group_members(&group_id).unwrap_or(0);
+            // Ensure at least 1 member (the founder) even if members table is empty
+            let member_count = if member_count == 0 { 1 } else { member_count };
+
+            let is_founder = our_pubkey == founder_pubkey;
+
+            // Determine role: check if we're founder, admin, or regular member
+            let our_member_id = torchat_core::crypto::generate_member_id(&group_id, &our_pubkey);
+            let members = db.load_group_members(&group_id).unwrap_or_default();
+            let is_admin = members.iter().any(|m| m.member_id == our_member_id && m.is_admin);
+
+            let role = if is_founder {
+                "founder".to_string()
+            } else if is_admin {
+                "admin".to_string()
+            } else {
+                "member".to_string()
+            };
+
             GroupInfo {
                 group_id: hex::encode(group_id),
                 name,
-                member_count: 0,
+                member_count,
                 state: state_str.to_string(),
-                is_founder: false,
+                is_founder,
+                role,
             }
         })
         .collect();
@@ -2623,7 +2677,7 @@ pub async fn accept_pending_invite(
     };
 
     let db = state.database.lock().await;
-    let (user_id, _identity, _display_name) = match db.get_user_by_session(&session_token) {
+    let (user_id, identity, _display_name) = match db.get_user_by_session(&session_token) {
         Ok(Some(user)) => user,
         _ => {
             return (
@@ -2694,6 +2748,40 @@ pub async fn accept_pending_invite(
         }
     };
 
+    let group_name = pending_invite.group_name.unwrap_or_else(|| "Group".to_string());
+
+    // Store a preliminary group record so it appears in the groups list immediately
+    let our_pubkey = identity.public_key().to_bytes();
+    let our_member_id = torchat_core::crypto::generate_member_id(&invite.group_id, &our_pubkey);
+    if let Err(e) = db.store_preliminary_group(&invite.group_id, &group_name, &invite.inviter_pubkey, &our_member_id) {
+        warn!(user_id, invite_id, error = %e, "Failed to store preliminary group record");
+    }
+
+    // Store ourselves as a member
+    let our_member = torchat_core::protocol::GroupMember {
+        member_id: our_member_id,
+        onion_address: Some(identity.onion_address().to_string()),
+        pubkey: our_pubkey,
+        is_admin: false,
+        joined_at: now,
+    };
+    if let Err(e) = db.store_group_member(&invite.group_id, &our_member) {
+        warn!(user_id, invite_id, error = %e, "Failed to store self as group member");
+    }
+
+    // Store the founder/inviter as a member
+    let founder_member_id = torchat_core::crypto::generate_member_id(&invite.group_id, &invite.inviter_pubkey);
+    let founder_member = torchat_core::protocol::GroupMember {
+        member_id: founder_member_id,
+        onion_address: Some(invite.bootstrap_peer.clone()),
+        pubkey: invite.inviter_pubkey,
+        is_admin: true,
+        joined_at: now,
+    };
+    if let Err(e) = db.store_group_member(&invite.group_id, &founder_member) {
+        warn!(user_id, invite_id, error = %e, "Failed to store founder as group member");
+    }
+
     drop(db); // Release the database lock before sending command
 
     // Get the daemon
@@ -2734,8 +2822,6 @@ pub async fn accept_pending_invite(
         warn!(user_id, invite_id, error = %e, "Failed to update invite status");
     }
 
-    let group_name = pending_invite.group_name.unwrap_or_else(|| "Group".to_string());
-
     info!(user_id, invite_id, group_id = ?invite.group_id, "Accepted group invite");
 
     (
@@ -2743,9 +2829,10 @@ pub async fn accept_pending_invite(
         Json(ApiResponse::ok(GroupInfo {
             group_id: hex::encode(invite.group_id),
             name: group_name,
-            member_count: 0,
+            member_count: 2,
             state: "Active".to_string(),
             is_founder: false,
+            role: "member".to_string(),
         })),
     )
 }
@@ -2829,6 +2916,266 @@ pub async fn decline_pending_invite(
     (
         StatusCode::OK,
         Json(ApiResponse::ok("Invite declined".to_string())),
+    )
+}
+
+// ==========================================
+// Group Member Management Endpoints
+// ==========================================
+
+/// List members of a group
+pub async fn list_group_members(
+    headers: HeaderMap,
+    Path(group_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<ApiResponse<Vec<GroupMemberInfo>>>) {
+    let session_token = match extract_session_token(&headers) {
+        Some(token) => token,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("No session token".to_string()),
+                }),
+            );
+        }
+    };
+
+    let db = state.database.lock().await;
+    let (user_id, _identity, _display_name) = match db.get_user_by_session(&session_token) {
+        Ok(Some(user)) => user,
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid session".to_string()),
+                }),
+            );
+        }
+    };
+
+    let group_id_bytes = match hex::decode(&group_id) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid group ID format".to_string()),
+                }),
+            );
+        }
+    };
+
+    let members = match db.load_group_members(&group_id_bytes) {
+        Ok(members) => members,
+        Err(e) => {
+            warn!(user_id, error = %e, "Failed to list group members");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Failed to list group members".to_string()),
+                }),
+            );
+        }
+    };
+
+    // Also get the founder pubkey to determine who is the founder
+    let founder_pubkey = db.load_group_metadata(&group_id_bytes)
+        .ok()
+        .flatten()
+        .map(|(_, fp, _, _, _, _, _)| fp);
+
+    let member_infos: Vec<GroupMemberInfo> = members
+        .into_iter()
+        .map(|m| {
+            let is_founder = founder_pubkey
+                .as_ref()
+                .map(|fp| *fp == m.pubkey)
+                .unwrap_or(false);
+
+            let role = if is_founder {
+                "founder".to_string()
+            } else if m.is_admin {
+                "admin".to_string()
+            } else {
+                "member".to_string()
+            };
+
+            GroupMemberInfo {
+                member_id: hex::encode(m.member_id),
+                onion_address: m.onion_address,
+                is_admin: m.is_admin,
+                joined_at: m.joined_at,
+                role,
+            }
+        })
+        .collect();
+
+    (StatusCode::OK, Json(ApiResponse::ok(member_infos)))
+}
+
+/// Promote a group member to admin (founder only)
+pub async fn promote_member(
+    headers: HeaderMap,
+    Path(group_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<PromoteMemberRequest>,
+) -> (StatusCode, Json<ApiResponse<String>>) {
+    let session_token = match extract_session_token(&headers) {
+        Some(token) => token,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("No session token".to_string()),
+                }),
+            );
+        }
+    };
+
+    let db = state.database.lock().await;
+    let (user_id, identity, _display_name) = match db.get_user_by_session(&session_token) {
+        Ok(Some(user)) => user,
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid session".to_string()),
+                }),
+            );
+        }
+    };
+
+    let group_id_bytes = match hex::decode(&group_id) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid group ID format".to_string()),
+                }),
+            );
+        }
+    };
+
+    let member_id_bytes = match hex::decode(&request.member_id) {
+        Ok(bytes) if bytes.len() == 16 => {
+            let mut arr = [0u8; 16];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid member ID format".to_string()),
+                }),
+            );
+        }
+    };
+
+    // Verify the current user is the founder
+    let our_pubkey = identity.public_key().to_bytes();
+    let group_meta = match db.load_group_metadata(&group_id_bytes) {
+        Ok(Some(meta)) => meta,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Group not found".to_string()),
+                }),
+            );
+        }
+        Err(e) => {
+            warn!(user_id, error = %e, "Failed to load group metadata");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Failed to load group".to_string()),
+                }),
+            );
+        }
+    };
+
+    let founder_pubkey = group_meta.1; // founder_pubkey is the second element
+    if our_pubkey != founder_pubkey {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some("Only the group founder can promote members to admin".to_string()),
+            }),
+        );
+    }
+
+    drop(db);
+
+    // Send promote command to daemon
+    let daemons = state.daemons.lock().await;
+    let daemon = match daemons.get(&user_id) {
+        Some(d) => d.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Daemon not running".to_string()),
+                }),
+            );
+        }
+    };
+    drop(daemons);
+
+    use torchat_core::messaging::DaemonCommand;
+    if let Err(e) = daemon.command_sender().send(DaemonCommand::PromoteToAdmin {
+        group_id: group_id_bytes,
+        member_id: member_id_bytes,
+    }).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Failed to promote member: {}", e)),
+            }),
+        );
+    }
+
+    info!(group_id, member_id = %request.member_id, "Promoted member to admin");
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse::ok("Member promoted to admin".to_string())),
     )
 }
 
