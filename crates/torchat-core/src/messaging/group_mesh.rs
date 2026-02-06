@@ -182,9 +182,15 @@ impl MeshTopology {
         }
     }
 
-    /// Get all active neighbors.
+    /// Get all active neighbors (healthy within timeout).
     pub fn active_neighbors(&self) -> impl Iterator<Item = &NeighborInfo> {
         self.neighbors.values().filter(|n| n.is_healthy())
+    }
+
+    /// Get all neighbors regardless of health status.
+    /// Use this for message forwarding since there's no heartbeat mechanism.
+    pub fn all_neighbors(&self) -> impl Iterator<Item = &NeighborInfo> {
+        self.neighbors.values()
     }
 
     /// Get all neighbor onion addresses.

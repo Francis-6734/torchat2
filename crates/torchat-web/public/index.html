@@ -99,6 +99,24 @@
         }
 
         /* Group menu button - visible on white header */
+        .group-members-btn {
+            background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
+            border: none;
+            color: white;
+            padding: 6px 12px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 16px;
+            box-shadow: 0 2px 8px rgba(67, 233, 123, 0.3);
+            transition: transform 0.2s, box-shadow 0.2s;
+            margin-right: 6px;
+        }
+
+        .group-members-btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 4px 12px rgba(67, 233, 123, 0.4);
+        }
+
         .group-menu-btn {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             border: none;
@@ -1025,11 +1043,12 @@
             <div class="chat-panel" id="group-chat-panel">
                 <div class="chat-header">
                     <button class="chat-back-btn" onclick="closeGroupChat()">&larr;</button>
-                    <div class="chat-contact-info">
+                    <div class="chat-contact-info" onclick="if(currentGroup) openMembersModal(currentGroup.id)" style="cursor: pointer;">
                         <div class="chat-contact-name" id="group-chat-name">Group</div>
                         <div class="chat-contact-address" id="group-chat-id"></div>
                     </div>
-                    <button class="group-menu-btn" onclick="openGroupMenu()">⋮</button>
+                    <button class="group-members-btn" onclick="if(currentGroup) openMembersModal(currentGroup.id)" title="View Members">&#128101;</button>
+                    <button class="group-menu-btn" onclick="openGroupMenu()">&#8942;</button>
                 </div>
                 <div class="messages-container" id="group-messages-container"></div>
                 <div class="input-area">

@@ -261,6 +261,17 @@ async function openGroupChat(groupId, groupName, role) {
     document.getElementById('group-chat-panel').classList.add('active');
     await loadGroupMessages(groupId);
     startGroupMessagePolling();
+
+    // Update member count in header
+    updateGroupMemberCount(groupId);
+}
+
+async function updateGroupMemberCount(groupId) {
+    const members = await loadGroupMembers(groupId);
+    const subtitle = document.getElementById('group-chat-id');
+    if (subtitle && members.length > 0) {
+        subtitle.textContent = `${members.length} member${members.length !== 1 ? 's' : ''} • tap to view`;
+    }
 }
 
 function closeGroupChat() {

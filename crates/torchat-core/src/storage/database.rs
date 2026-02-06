@@ -642,7 +642,7 @@ impl Database {
                     group_id.as_slice(),
                     message.id.as_slice(),
                     message.sender_id.as_slice(),
-                    &message.content,
+                    message.content.as_bytes(),
                     message.timestamp,
                     now,
                 ],
@@ -671,25 +671,31 @@ impl Database {
             .query_map(params![group_id.as_slice(), limit], |row| {
                 let msg_id_bytes: Vec<u8> = row.get(0)?;
                 let sender_id_bytes: Vec<u8> = row.get(1)?;
-                let content_blob: Vec<u8> = row.get(2)?;
+                // Handle both BLOB (new) and TEXT (old) storage for content
+                let content_data: Vec<u8> = row.get::<_, Vec<u8>>(2).or_else(|_| {
+                    row.get::<_, String>(2).map(|s| s.into_bytes())
+                })?;
                 let timestamp: i64 = row.get(3)?;
-                Ok((msg_id_bytes, sender_id_bytes, content_blob, timestamp))
+                Ok((msg_id_bytes, sender_id_bytes, content_data, timestamp))
             })
             .map_err(|e| Error::Storage(e.to_string()))?;
 
         let mut messages = Vec::new();
         for row in rows {
-            let (msg_id_bytes, sender_id_bytes, content_blob, timestamp) =
+            let (msg_id_bytes, sender_id_bytes, content_data, timestamp) =
                 row.map_err(|e| Error::Storage(e.to_string()))?;
 
             let mut msg_id = [0u8; 32];
-            msg_id.copy_from_slice(&msg_id_bytes);
+            if msg_id_bytes.len() == 32 {
+                msg_id.copy_from_slice(&msg_id_bytes);
+            }
 
             let mut sender_id = [0u8; 16];
-            sender_id.copy_from_slice(&sender_id_bytes);
+            if sender_id_bytes.len() == 16 {
+                sender_id.copy_from_slice(&sender_id_bytes);
+            }
 
-            // Content is stored as BLOB, convert to String
-            let content = String::from_utf8_lossy(&content_blob).to_string();
+            let content = String::from_utf8_lossy(&content_data).to_string();
 
             messages.push(GroupMessage {
                 id: msg_id,

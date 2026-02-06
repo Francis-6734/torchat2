@@ -1141,7 +1141,7 @@ impl MessagingDaemon {
             }
             PacketType::GroupMessage => {
                 // Handle group message (gossip)
-                Self::handle_group_message_packet(&packet, &event_tx, &group_sessions, &database).await
+                Self::handle_group_message_packet(&packet, &event_tx, &group_sessions, &database, &sessions, &tor_config).await
             }
             PacketType::GroupJoinRequest => {
                 // Handle join request from new member
@@ -1277,7 +1277,7 @@ impl MessagingDaemon {
                         }
                         PacketType::GroupMessage => {
                             // Handle group message (gossip)
-                            if let Err(e) = Self::handle_group_message_packet(&packet, &event_tx, &group_sessions, &database).await {
+                            if let Err(e) = Self::handle_group_message_packet(&packet, &event_tx, &group_sessions, &database, &sessions, &tor_config).await {
                                 warn!(error = %e, "Failed to handle group message");
                             }
                         }
@@ -1919,34 +1919,46 @@ impl MessagingDaemon {
                     });
                 }
                 DaemonCommand::SendGroupMessage { group_id, content } => {
-                    let mut groups = group_sessions.write().await;
-                    if let Some(session) = groups.get_mut(&group_id) {
-                        match session.send_message(&content) {
-                            Ok(payload) => {
-                                // Store message in database
-                                if let Some(last_message) = session.messages.back() {
-                                    if let Err(e) = database.lock().await.store_group_message(&group_id, last_message) {
-                                        warn!(error = %e, "Failed to persist group message to database");
+                    let send_result = {
+                        let mut groups = group_sessions.write().await;
+                        if let Some(session) = groups.get_mut(&group_id) {
+                            match session.send_message(&content) {
+                                Ok(payload) => {
+                                    // Store message in database
+                                    if let Some(last_message) = session.messages.back() {
+                                        if let Err(e) = database.lock().await.store_group_message(&group_id, last_message) {
+                                            warn!(error = %e, "Failed to persist group message to database");
+                                        }
                                     }
-                                }
 
-                                // Forward to all neighbors
-                                for neighbor in session.mesh.active_neighbors() {
-                                    let _ = Self::send_group_message_to_peer(
-                                        &neighbor.onion_address,
-                                        &payload,
-                                        &sessions,
-                                        &tor_config,
-                                    ).await;
+                                    // Collect all neighbor addresses before releasing write lock
+                                    let neighbor_addrs: Vec<String> = session.mesh.all_neighbors()
+                                        .map(|n| n.onion_address.clone())
+                                        .collect();
+                                    Some((payload, neighbor_addrs))
                                 }
-                                info!(group_id = ?group_id, "Group message sent");
+                                Err(e) => {
+                                    warn!(group_id = ?group_id, error = %e, "Failed to send group message");
+                                    None
+                                }
                             }
-                            Err(e) => {
-                                warn!(group_id = ?group_id, error = %e, "Failed to send group message");
-                            }
+                        } else {
+                            warn!(group_id = ?group_id, "Group not found");
+                            None
                         }
-                    } else {
-                        warn!(group_id = ?group_id, "Group not found");
+                    }; // Write lock released here
+
+                    // Forward to all neighbors without holding group_sessions lock
+                    if let Some((payload, neighbor_addrs)) = send_result {
+                        for addr in &neighbor_addrs {
+                            let _ = Self::send_group_message_to_peer(
+                                addr,
+                                &payload,
+                                &sessions,
+                                &tor_config,
+                            ).await;
+                        }
+                        info!(group_id = ?group_id, "Group message sent to {} neighbors", neighbor_addrs.len());
                     }
                 }
                 DaemonCommand::LeaveGroup { group_id } => {
@@ -2046,33 +2058,43 @@ impl MessagingDaemon {
                     let content = format!("[FILE_META]{}", meta_json);
 
                     // Send via existing group message path
-                    let mut groups = group_sessions.write().await;
-                    if let Some(session) = groups.get_mut(&group_id) {
-                        match session.send_message(&content) {
-                            Ok(payload) => {
-                                // Store message in database
-                                if let Some(last_message) = session.messages.back() {
-                                    if let Err(e) = database.lock().await.store_group_message(&group_id, last_message) {
-                                        warn!(error = %e, "Failed to persist group file message");
+                    let file_send_result = {
+                        let mut groups = group_sessions.write().await;
+                        if let Some(session) = groups.get_mut(&group_id) {
+                            match session.send_message(&content) {
+                                Ok(payload) => {
+                                    // Store message in database
+                                    if let Some(last_message) = session.messages.back() {
+                                        if let Err(e) = database.lock().await.store_group_message(&group_id, last_message) {
+                                            warn!(error = %e, "Failed to persist group file message");
+                                        }
                                     }
+                                    let neighbor_addrs: Vec<String> = session.mesh.all_neighbors()
+                                        .map(|n| n.onion_address.clone())
+                                        .collect();
+                                    Some((payload, neighbor_addrs))
                                 }
-                                // Forward to all neighbors
-                                for neighbor in session.mesh.active_neighbors() {
-                                    let _ = Self::send_group_message_to_peer(
-                                        &neighbor.onion_address,
-                                        &payload,
-                                        &sessions,
-                                        &tor_config,
-                                    ).await;
+                                Err(e) => {
+                                    warn!(group_id = ?group_id, error = %e, "Failed to send group file announcement");
+                                    None
                                 }
-                                info!(group_id = ?group_id, file_id = %file_id_hex, "Group file shared");
                             }
-                            Err(e) => {
-                                warn!(group_id = ?group_id, error = %e, "Failed to send group file announcement");
-                            }
+                        } else {
+                            warn!(group_id = ?group_id, "Group not found for file sharing");
+                            None
                         }
-                    } else {
-                        warn!(group_id = ?group_id, "Group not found for file sharing");
+                    };
+
+                    if let Some((payload, neighbor_addrs)) = file_send_result {
+                        for addr in &neighbor_addrs {
+                            let _ = Self::send_group_message_to_peer(
+                                addr,
+                                &payload,
+                                &sessions,
+                                &tor_config,
+                            ).await;
+                        }
+                        info!(group_id = ?group_id, file_id = %file_id_hex, "Group file shared to {} neighbors", neighbor_addrs.len());
                     }
                 }
                 DaemonCommand::DownloadGroupFile { group_id, file_id, sender_onion } => {
@@ -2752,6 +2774,8 @@ impl MessagingDaemon {
         event_tx: &broadcast::Sender<DaemonEvent>,
         group_sessions: &Arc<RwLock<HashMap<[u8; 32], crate::messaging::group_session::GroupSession>>>,
         database: &Arc<TokioMutex<Database>>,
+        sessions: &Arc<RwLock<HashMap<String, PeerSession>>>,
+        tor_config: &TorConnectionConfig,
     ) -> Result<()> {
         let payload = crate::protocol::GroupMessagePayload::from_bytes(&packet.payload)?;
 
@@ -2762,109 +2786,135 @@ impl MessagingDaemon {
             "Received group message"
         );
 
-        // Look up group session
-        let mut groups = group_sessions.write().await;
-        if let Some(session) = groups.get_mut(&payload.group_id) {
-            // Process message through gossip manager
-            let group_id = payload.group_id;
-            match session.receive_message(&payload) {
-                Ok(Some(received)) => {
-                    // Store received message in database
+        // Process message and collect relay info while holding the lock
+        let process_result = {
+            let mut groups = group_sessions.write().await;
+            if let Some(session) = groups.get_mut(&payload.group_id) {
+                let group_id = payload.group_id;
+                match session.receive_message(&payload) {
+                    Ok(Some(received)) => {
+                        // Prepare gossip relay - forward to all neighbors
+                        let forward_payload = session.gossip.prepare_for_forward(payload.clone());
+                        let neighbor_addrs: Vec<String> = session.mesh.all_neighbors()
+                            .map(|n| n.onion_address.clone())
+                            .collect();
+                        Some((group_id, received, forward_payload, neighbor_addrs))
+                    }
+                    Ok(None) => {
+                        debug!(
+                            group_id = ?payload.group_id,
+                            msg_id = ?payload.msg_id,
+                            "Duplicate group message (already seen)"
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        warn!(
+                            group_id = ?payload.group_id,
+                            error = %e,
+                            "Failed to process group message"
+                        );
+                        None
+                    }
+                }
+            } else {
+                debug!(
+                    group_id = ?payload.group_id,
+                    "Received message for unknown group"
+                );
+                None
+            }
+        }; // Write lock released here
+
+        // Process the received message outside the lock
+        if let Some((group_id, received, forward_payload, neighbor_addrs)) = process_result {
+            // Store received message in database
+            {
+                let received_msg = crate::messaging::group_session::GroupMessage {
+                    id: received.msg_id,
+                    sender_id: received.sender_id,
+                    content: received.content.clone(),
+                    timestamp: received.timestamp,
+                    outgoing: false,
+                };
+                let db = database.lock().await;
+                if let Err(e) = db.store_group_message(&group_id, &received_msg) {
+                    warn!(error = %e, "Failed to persist received group message to database");
+                }
+            }
+
+            // Check if this is a file metadata message
+            if received.content.starts_with("[FILE_META]") {
+                let json_str = &received.content["[FILE_META]".len()..];
+                if let Ok(meta) = serde_json::from_str::<serde_json::Value>(json_str) {
+                    let file_id = meta["file_id"].as_str().unwrap_or_default().to_string();
+                    let filename = meta["filename"].as_str().unwrap_or_default().to_string();
+                    let size = meta["size"].as_u64().unwrap_or(0);
+                    let hash_hex = meta["hash"].as_str().unwrap_or_default();
+                    let sender_onion = meta["sender_onion"].as_str().unwrap_or_default().to_string();
+
+                    let mut file_hash = [0u8; 32];
+                    if let Ok(bytes) = hex::decode(hash_hex) {
+                        if bytes.len() == 32 {
+                            file_hash.copy_from_slice(&bytes);
+                        }
+                    }
+
+                    // Store file metadata in database
                     {
-                        let received_msg = crate::messaging::group_session::GroupMessage {
-                            id: received.msg_id,
-                            sender_id: received.sender_id,
-                            content: received.content.clone(),
-                            timestamp: received.timestamp,
-                            outgoing: false,
-                        };
                         let db = database.lock().await;
-                        if let Err(e) = db.store_group_message(&group_id, &received_msg) {
-                            warn!(error = %e, "Failed to persist received group message to database");
+                        if let Err(e) = db.store_group_file(
+                            &group_id, &file_id, &filename, size,
+                            &file_hash, &received.sender_id, &sender_onion,
+                            None, "available",
+                        ) {
+                            warn!(error = %e, "Failed to store group file metadata");
                         }
                     }
 
-                    // Check if this is a file metadata message
-                    if received.content.starts_with("[FILE_META]") {
-                        let json_str = &received.content["[FILE_META]".len()..];
-                        if let Ok(meta) = serde_json::from_str::<serde_json::Value>(json_str) {
-                            let file_id = meta["file_id"].as_str().unwrap_or_default().to_string();
-                            let filename = meta["filename"].as_str().unwrap_or_default().to_string();
-                            let size = meta["size"].as_u64().unwrap_or(0);
-                            let hash_hex = meta["hash"].as_str().unwrap_or_default();
-                            let sender_onion = meta["sender_onion"].as_str().unwrap_or_default().to_string();
-
-                            let mut file_hash = [0u8; 32];
-                            if let Ok(bytes) = hex::decode(hash_hex) {
-                                if bytes.len() == 32 {
-                                    file_hash.copy_from_slice(&bytes);
-                                }
-                            }
-
-                            // Store file metadata in database
-                            {
-                                let db = database.lock().await;
-                                if let Err(e) = db.store_group_file(
-                                    &payload.group_id, &file_id, &filename, size,
-                                    &file_hash, &received.sender_id, &sender_onion,
-                                    None, "available",
-                                ) {
-                                    warn!(error = %e, "Failed to store group file metadata");
-                                }
-                            }
-
-                            // Emit file shared event
-                            let _ = event_tx.send(DaemonEvent::GroupFileShared {
-                                group_id: payload.group_id,
-                                file_id: file_id.clone(),
-                                filename: filename.clone(),
-                                size,
-                                sender_onion,
-                            });
-
-                            info!(
-                                group_id = ?payload.group_id,
-                                file_id = %file_id,
-                                filename = %filename,
-                                "Group file metadata received"
-                            );
-                        }
-                    }
-
-                    // Always emit GroupMessageReceived so message appears in chat
-                    let _ = event_tx.send(DaemonEvent::GroupMessageReceived {
-                        group_id: payload.group_id,
-                        sender_id: received.sender_id,
-                        content: received.content,
-                        timestamp: received.timestamp,
+                    // Emit file shared event
+                    let _ = event_tx.send(DaemonEvent::GroupFileShared {
+                        group_id,
+                        file_id: file_id.clone(),
+                        filename: filename.clone(),
+                        size,
+                        sender_onion,
                     });
 
                     info!(
-                        group_id = ?payload.group_id,
-                        msg_id = ?received.msg_id,
-                        "New group message received and processed"
-                    );
-                }
-                Ok(None) => {
-                    // Duplicate message - already seen
-                    debug!(
-                        group_id = ?payload.group_id,
-                        msg_id = ?payload.msg_id,
-                        "Duplicate group message (already seen)"
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        group_id = ?payload.group_id,
-                        error = %e,
-                        "Failed to process group message"
+                        group_id = ?group_id,
+                        file_id = %file_id,
+                        filename = %filename,
+                        "Group file metadata received"
                     );
                 }
             }
-        } else {
-            debug!(
-                group_id = ?payload.group_id,
-                "Received message for unknown group"
+
+            // Always emit GroupMessageReceived so message appears in chat
+            let _ = event_tx.send(DaemonEvent::GroupMessageReceived {
+                group_id,
+                sender_id: received.sender_id,
+                content: received.content,
+                timestamp: received.timestamp,
+            });
+
+            // Gossip relay: forward to other neighbors
+            if let Some(fwd_payload) = forward_payload {
+                for addr in &neighbor_addrs {
+                    let _ = Self::send_group_message_to_peer(
+                        addr,
+                        &fwd_payload,
+                        sessions,
+                        tor_config,
+                    ).await;
+                }
+                debug!(group_id = ?group_id, "Relayed group message to {} neighbors", neighbor_addrs.len());
+            }
+
+            info!(
+                group_id = ?group_id,
+                msg_id = ?received.msg_id,
+                "New group message received and processed"
             );
         }
 
@@ -2918,7 +2968,7 @@ impl MessagingDaemon {
 
                     // Collect member list and neighbors
                     let member_list: Vec<_> = session.members.values().cloned().collect();
-                    let neighbor_list: Vec<_> = session.mesh.active_neighbors()
+                    let neighbor_list: Vec<_> = session.mesh.all_neighbors()
                         .map(|n| n.onion_address.clone())
                         .take(3)
                         .collect();
