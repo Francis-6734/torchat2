@@ -232,6 +232,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/register", post(api::register_user))
         // Contacts - per-user contact list
         .route("/api/contacts", get(api::list_contacts).post(api::add_contact))
+        .route("/api/contacts/:contact_id/delete", post(api::delete_contact))
         // Messages - P2P messaging
         .route("/api/messages/:address", get(api::get_messages))
         .route("/api/messages", post(api::send_message))
@@ -258,6 +259,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/groups/:group_id/invite", post(api::send_group_invite))
         .route("/api/groups/:group_id/messages", get(api::get_group_messages).post(api::send_group_message))
         .route("/api/groups/:group_id/leave", post(api::leave_group))
+        .route("/api/groups/:group_id/delete", post(api::delete_group))
         .route("/api/groups/:group_id/members", get(api::list_group_members))
         .route("/api/groups/:group_id/promote", post(api::promote_member))
         // Group file sharing

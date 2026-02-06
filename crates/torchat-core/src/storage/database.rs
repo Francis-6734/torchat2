@@ -1101,6 +1101,60 @@ impl Database {
         Ok(contacts)
     }
 
+    /// Delete a contact for a specific user, including all their messages.
+    pub fn delete_user_contact(&self, user_id: i64, contact_id: i64) -> Result<bool> {
+        // Delete associated simple messages first
+        let _ = self.conn.execute(
+            "DELETE FROM simple_messages WHERE user_id = ? AND peer_address = (SELECT onion_address FROM contacts WHERE id = ? AND user_id = ?)",
+            params![user_id, contact_id, user_id],
+        );
+
+        let rows = self
+            .conn
+            .execute(
+                "DELETE FROM contacts WHERE id = ? AND user_id = ?",
+                params![contact_id, user_id],
+            )
+            .map_err(|e| Error::Storage(format!("failed to delete contact: {}", e)))?;
+
+        Ok(rows > 0)
+    }
+
+    /// Delete a group completely, including all members, messages, files, and invites.
+    /// Uses CASCADE via the foreign key on group_db_id.
+    pub fn delete_group(&self, group_id: &[u8; 32]) -> Result<bool> {
+        // Delete in order: files, messages, gossip_seen, members, invites, epoch_keys, then the group itself
+        let group_db_id: Option<i64> = self.conn.query_row(
+            "SELECT id FROM groups WHERE group_id = ?",
+            params![group_id.as_slice()],
+            |row| row.get(0),
+        ).ok();
+
+        let db_id = match group_db_id {
+            Some(id) => id,
+            None => return Ok(false),
+        };
+
+        // Delete dependent records
+        let _ = self.conn.execute("DELETE FROM group_files WHERE group_db_id = ?", params![db_id]);
+        let _ = self.conn.execute("DELETE FROM group_messages WHERE group_db_id = ?", params![db_id]);
+        let _ = self.conn.execute("DELETE FROM group_gossip_seen WHERE group_db_id = ?", params![db_id]);
+        let _ = self.conn.execute("DELETE FROM group_members WHERE group_db_id = ?", params![db_id]);
+        let _ = self.conn.execute("DELETE FROM group_invites WHERE group_id = ?", params![db_id]);
+        let _ = self.conn.execute("DELETE FROM group_epoch_keys WHERE group_id = ?", params![db_id]);
+
+        // Delete the group itself
+        let rows = self
+            .conn
+            .execute(
+                "DELETE FROM groups WHERE id = ?",
+                params![db_id],
+            )
+            .map_err(|e| Error::Storage(format!("failed to delete group: {}", e)))?;
+
+        Ok(rows > 0)
+    }
+
     /// List all users (for admin/debugging).
     pub fn list_all_users(&self) -> Result<Vec<UserInfo>> {
         let mut stmt = self

@@ -215,10 +215,35 @@
             cursor: pointer;
             box-shadow: 0 2px 4px rgba(0,0,0,0.05);
             transition: transform 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .contact-info-row {
+            flex: 1;
+            min-width: 0;
         }
 
         .contact-item:active {
             transform: scale(0.98);
+        }
+
+        .contact-delete-btn {
+            background: none;
+            border: none;
+            font-size: 18px;
+            color: #ccc;
+            cursor: pointer;
+            padding: 4px 8px;
+            border-radius: 6px;
+            transition: color 0.2s, background 0.2s;
+            flex-shrink: 0;
+        }
+
+        .contact-delete-btn:hover {
+            color: #e74c3c;
+            background: rgba(231, 76, 60, 0.1);
         }
 
         .contact-name {
@@ -1256,9 +1281,12 @@
 
             if (result.success && result.data && result.data.length > 0) {
                 const html = result.data.map(c => `
-                    <div class="contact-item" onclick="openChat('${c.address}', '${escapeHtml(c.name || '')}')">
-                        <div class="contact-name">${escapeHtml(c.name) || 'Unknown'}</div>
-                        <div class="contact-address">${c.address}</div>
+                    <div class="contact-item">
+                        <div class="contact-info-row" onclick="openChat('${c.address}', '${escapeHtml(c.name || '')}')">
+                            <div class="contact-name">${escapeHtml(c.name) || 'Unknown'}</div>
+                            <div class="contact-address">${c.address}</div>
+                        </div>
+                        <button class="contact-delete-btn" onclick="event.stopPropagation(); deleteContact('${c.id}', '${escapeHtml(c.name || c.address)}')" title="Delete contact">&#128465;</button>
                     </div>
                 `).join('');
                 list.innerHTML = html;
@@ -1275,6 +1303,18 @@
                 list.innerHTML = '<div class="empty-state"><p>No contacts yet</p></div>';
                 recentChats.style.display = 'none';
                 chatsEmpty.style.display = 'block';
+            }
+        }
+
+        async function deleteContact(contactId, contactLabel) {
+            if (!confirm(`Delete contact "${contactLabel}"? This will also delete all messages with this contact.`)) return;
+
+            const result = await api(`/api/contacts/${contactId}/delete`, 'POST');
+            if (result.success) {
+                showToast('Contact deleted');
+                loadContacts();
+            } else {
+                showToast('Failed to delete: ' + (result.error || 'Unknown error'));
             }
         }
 

@@ -137,10 +137,13 @@ async function loadGroups() {
         const html = result.data.map(g => {
             const role = g.role || (g.is_founder ? 'founder' : 'member');
             return `
-            <div class="contact-item" onclick="openGroupChat('${g.group_id}', '${escapeHtml(g.name)}', '${role}')">
-                <div class="contact-name">🔒 ${escapeHtml(g.name)}</div>
-                <div class="contact-address">${g.member_count} member${g.member_count !== 1 ? 's' : ''} • ${g.state}</div>
-                ${getRoleBadge(role)}
+            <div class="contact-item">
+                <div class="contact-info-row" onclick="openGroupChat('${g.group_id}', '${escapeHtml(g.name)}', '${role}')">
+                    <div class="contact-name">🔒 ${escapeHtml(g.name)}</div>
+                    <div class="contact-address">${g.member_count} member${g.member_count !== 1 ? 's' : ''} • ${g.state}</div>
+                    ${getRoleBadge(role)}
+                </div>
+                <button class="contact-delete-btn" onclick="event.stopPropagation(); deleteGroup('${g.group_id}', '${escapeHtml(g.name)}')" title="Delete group">&#128465;</button>
             </div>
         `;
         }).join('');
@@ -245,6 +248,23 @@ async function leaveGroup(groupId) {
         loadGroups();
     } else {
         showToast('Failed to leave group: ' + (result.error || 'Unknown error'));
+    }
+}
+
+async function deleteGroup(groupId, groupName) {
+    if (!confirm(`Delete group "${groupName}"? This will permanently remove all messages, members, and files from this group on your device.`)) return;
+
+    const result = await api(`/api/groups/${groupId}/delete`, 'POST');
+
+    if (result.success) {
+        showToast('Group deleted');
+        // If we have this group chat open, close it
+        if (currentGroup && currentGroup.id === groupId) {
+            closeGroupChat();
+        }
+        loadGroups();
+    } else {
+        showToast('Failed to delete group: ' + (result.error || 'Unknown error'));
     }
 }
 
@@ -700,6 +720,9 @@ function openGroupMenu() {
             `}
             <button class="btn btn-secondary" style="background: rgba(255,255,255,0.9); color: #333;" onclick="leaveGroup('${currentGroup.id}'); this.closest('.modal').remove()">
                 🚪 Leave Group
+            </button>
+            <button class="btn btn-secondary" style="background: #e74c3c; color: white;" onclick="deleteGroup('${currentGroup.id}', '${escapeHtml(currentGroup.name)}'); this.closest('.modal').remove()">
+                🗑 Delete Group
             </button>
             <button class="btn btn-secondary" style="background: rgba(255,255,255,0.9); color: #333;" onclick="this.closest('.modal').remove()">
                 ✖️ Cancel

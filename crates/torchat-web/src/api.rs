@@ -504,6 +504,168 @@ pub async fn add_contact(
     }
 }
 
+/// Delete a contact
+pub async fn delete_contact(
+    headers: HeaderMap,
+    Path(contact_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<ApiResponse<String>>) {
+    let (user_id, _, _) = match get_current_user(&headers, &state).await {
+        Ok(user) => user,
+        Err((status, _json)) => {
+            return (
+                status,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Unauthorized".to_string()),
+                }),
+            );
+        }
+    };
+
+    let contact_db_id: i64 = match contact_id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid contact ID".to_string()),
+                }),
+            );
+        }
+    };
+
+    let db = state.database.lock().await;
+    match db.delete_user_contact(user_id, contact_db_id) {
+        Ok(true) => {
+            info!(user_id, contact_id = contact_db_id, "Contact deleted");
+            (StatusCode::OK, Json(ApiResponse::ok("Contact deleted".to_string())))
+        }
+        Ok(false) => {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Contact not found".to_string()),
+                }),
+            )
+        }
+        Err(e) => {
+            warn!(user_id, error = %e, "Failed to delete contact");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some(format!("Failed to delete contact: {}", e)),
+                }),
+            )
+        }
+    }
+}
+
+/// Delete a group completely (removes all data)
+pub async fn delete_group(
+    headers: HeaderMap,
+    Path(group_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<ApiResponse<String>>) {
+    let session_token = match extract_session_token(&headers) {
+        Some(token) => token,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("No session token".to_string()),
+                }),
+            );
+        }
+    };
+
+    let db = state.database.lock().await;
+    let (user_id, _identity, _display_name) = match db.get_user_by_session(&session_token) {
+        Ok(Some(user)) => user,
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid session".to_string()),
+                }),
+            );
+        }
+    };
+
+    let group_id_bytes = match hex::decode(&group_id) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid group ID format".to_string()),
+                }),
+            );
+        }
+    };
+
+    // Remove group from database
+    match db.delete_group(&group_id_bytes) {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Group not found".to_string()),
+                }),
+            );
+        }
+        Err(e) => {
+            warn!(user_id, error = %e, "Failed to delete group from database");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some(format!("Failed to delete group: {}", e)),
+                }),
+            );
+        }
+    }
+    drop(db);
+
+    // Also remove from daemon's in-memory group sessions
+    let daemons = state.daemons.lock().await;
+    if let Some(daemon) = daemons.get(&user_id) {
+        use torchat_core::messaging::DaemonCommand;
+        let _ = daemon.command_sender().send(DaemonCommand::LeaveGroup {
+            group_id: group_id_bytes,
+        }).await;
+    }
+    drop(daemons);
+
+    info!(group_id, user_id, "Group deleted");
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse::ok("Group deleted".to_string())),
+    )
+}
+
 /// Get messages with a contact
 pub async fn get_messages(
     headers: HeaderMap,
