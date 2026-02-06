@@ -1145,7 +1145,7 @@ impl MessagingDaemon {
             }
             PacketType::GroupJoinRequest => {
                 // Handle join request from new member
-                Self::handle_group_join_request_packet(&packet, &event_tx, &group_sessions, &identity, &tor_config).await
+                Self::handle_group_join_request_packet(&packet, &event_tx, &group_sessions, &identity, &tor_config, &database).await
             }
             PacketType::GroupJoinAccept => {
                 // Handle join accept from bootstrap peer
@@ -1283,7 +1283,7 @@ impl MessagingDaemon {
                         }
                         PacketType::GroupJoinRequest => {
                             // Handle join request from new member
-                            if let Err(e) = Self::handle_group_join_request_packet(&packet, &event_tx, &group_sessions, &identity, &tor_config).await {
+                            if let Err(e) = Self::handle_group_join_request_packet(&packet, &event_tx, &group_sessions, &identity, &tor_config, &database).await {
                                 warn!(error = %e, "Failed to handle group join request");
                             }
                         }
@@ -2766,8 +2766,24 @@ impl MessagingDaemon {
         let mut groups = group_sessions.write().await;
         if let Some(session) = groups.get_mut(&payload.group_id) {
             // Process message through gossip manager
+            let group_id = payload.group_id;
             match session.receive_message(&payload) {
                 Ok(Some(received)) => {
+                    // Store received message in database
+                    {
+                        let received_msg = crate::messaging::group_session::GroupMessage {
+                            id: received.msg_id,
+                            sender_id: received.sender_id,
+                            content: received.content.clone(),
+                            timestamp: received.timestamp,
+                            outgoing: false,
+                        };
+                        let db = database.lock().await;
+                        if let Err(e) = db.store_group_message(&group_id, &received_msg) {
+                            warn!(error = %e, "Failed to persist received group message to database");
+                        }
+                    }
+
                     // Check if this is a file metadata message
                     if received.content.starts_with("[FILE_META]") {
                         let json_str = &received.content["[FILE_META]".len()..];
@@ -2862,6 +2878,7 @@ impl MessagingDaemon {
         group_sessions: &Arc<RwLock<HashMap<[u8; 32], crate::messaging::group_session::GroupSession>>>,
         identity: &TorIdentity,
         tor_config: &TorConnectionConfig,
+        database: &Arc<TokioMutex<Database>>,
     ) -> Result<()> {
         let payload = crate::protocol::GroupJoinRequestPayload::from_bytes(&packet.payload)?;
 
@@ -2871,9 +2888,9 @@ impl MessagingDaemon {
             "Received group join request"
         );
 
-        // Look up group session
-        let groups = group_sessions.read().await;
-        if let Some(session) = groups.get(&payload.group_id) {
+        // Look up group session (write lock so we can add the new member)
+        let mut groups = group_sessions.write().await;
+        if let Some(session) = groups.get_mut(&payload.group_id) {
             // Convert inviter pubkey to VerifyingKey
             let inviter_key = ed25519_dalek::VerifyingKey::from_bytes(&payload.invite_token.inviter_pubkey)
                 .map_err(|_| Error::Crypto("Invalid inviter public key".into()))?;
@@ -2934,10 +2951,35 @@ impl MessagingDaemon {
                         acceptor_signature: acceptor_signature.to_bytes(),
                     };
 
+                    // Add the new member to our session and database
+                    let new_member_id = crate::crypto::generate_member_id(
+                        &payload.group_id,
+                        &payload.requester_pubkey,
+                    );
+                    let new_member = crate::protocol::GroupMember {
+                        member_id: new_member_id,
+                        onion_address: Some(payload.requester_onion.clone()),
+                        pubkey: payload.requester_pubkey,
+                        is_admin: false,
+                        joined_at: now,
+                    };
+
+                    // Add to in-memory session (members + mesh)
+                    session.add_member(new_member.clone());
+
+                    // Persist new member to database
+                    {
+                        let db = database.lock().await;
+                        if let Err(e) = db.store_group_member(&payload.group_id, &new_member) {
+                            warn!(error = %e, "Failed to store new group member in database");
+                        }
+                    }
+
                     info!(
                         group_id = ?payload.group_id,
                         joiner = %payload.requester_onion,
-                        "Accepting join request"
+                        member_count = session.member_count(),
+                        "Accepting join request, added new member"
                     );
 
                     // Emit event for tracking

@@ -2432,7 +2432,7 @@ pub async fn get_group_messages(
     };
 
     let db = state.database.lock().await;
-    let (user_id, _identity, _display_name) = match db.get_user_by_session(&session_token) {
+    let (user_id, identity, _display_name) = match db.get_user_by_session(&session_token) {
         Ok(Some(user)) => user,
         _ => {
             return (
@@ -2464,6 +2464,10 @@ pub async fn get_group_messages(
         }
     };
 
+    // Compute our member_id to determine which messages are outgoing
+    let our_pubkey = identity.public_key().to_bytes();
+    let our_member_id = torchat_core::crypto::generate_member_id(&group_id_bytes, &our_pubkey);
+
     let messages = match db.load_group_messages(&group_id_bytes, 100) {
         Ok(msgs) => msgs,
         Err(e) => {
@@ -2481,12 +2485,15 @@ pub async fn get_group_messages(
 
     let message_infos: Vec<GroupMessageInfo> = messages
         .into_iter()
-        .map(|msg| GroupMessageInfo {
-            message_id: hex::encode(msg.id),
-            sender_id: hex::encode(msg.sender_id),
-            content: msg.content,
-            timestamp: msg.timestamp,
-            outgoing: msg.outgoing,
+        .map(|msg| {
+            let is_outgoing = msg.sender_id == our_member_id;
+            GroupMessageInfo {
+                message_id: hex::encode(msg.id),
+                sender_id: hex::encode(msg.sender_id),
+                content: msg.content,
+                timestamp: msg.timestamp,
+                outgoing: is_outgoing,
+            }
         })
         .collect();
 
