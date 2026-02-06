@@ -12,7 +12,7 @@ use crate::protocol::GroupMessagePayload;
 use lru::LruCache;
 use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
-use tracing::{debug, info, warn};
+use tracing::debug;
 
 /// Maximum hop count for gossip messages (TTL).
 pub const MAX_HOP_COUNT: u8 = 10;

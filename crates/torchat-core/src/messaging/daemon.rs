@@ -15,7 +15,7 @@ use crate::protocol::{
 };
 use crate::storage::Database;
 use crate::tor::{OnionService, OnionServiceConfig, TorConnection, TorConnectionConfig};
-use crate::messaging::file_transfer::{FileMetadata, FileTransferManager, TransferState};
+use crate::messaging::file_transfer::{FileMetadata, FileTransferManager};
 
 use ed25519_dalek::Signer;
 use serde::{Deserialize, Serialize};
@@ -37,7 +37,7 @@ const MAX_RETRY_ATTEMPTS: u32 = 5;
 const RETRY_BASE_DELAY_SECS: u64 = 2;
 
 /// Connection timeout in seconds.
-const CONNECTION_TIMEOUT_SECS: u64 = 30;
+const _CONNECTION_TIMEOUT_SECS: u64 = 30;
 
 /// Message pending delivery confirmation.
 #[derive(Debug, Clone)]
@@ -53,7 +53,7 @@ struct PendingMessage {
     /// Time of last attempt.
     last_attempt: Instant,
     /// Time message was queued.
-    queued_at: Instant,
+    _queued_at: Instant,
 }
 
 /// Simple chat hello payload (includes sender address for initial handshake).
@@ -523,7 +523,7 @@ impl PeerSession {
     }
 
     /// Check if we should retry connecting (with backoff).
-    fn should_retry_connect(&self) -> bool {
+    fn _should_retry_connect(&self) -> bool {
         match self.last_connect_attempt {
             Some(last) => last.elapsed() > Duration::from_secs(RETRY_BASE_DELAY_SECS),
             None => true,
@@ -640,7 +640,7 @@ impl MessagingDaemon {
             let db = self.database.lock().await;
             match db.list_groups() {
                 Ok(groups) => {
-                    for (group_id, name, _founder_pubkey, state) in groups {
+                    for (group_id, name, _founder_pubkey, _state) in groups {
                         // Load full group metadata
                         match db.load_group_metadata(&group_id) {
                             Ok(Some((name, founder_pubkey, our_member_id, epoch_number, epoch_key, policy, state))) => {
@@ -1634,7 +1634,7 @@ impl MessagingDaemon {
                                 content: content.clone(),
                                 attempts: 1,
                                 last_attempt: Instant::now(),
-                                queued_at: Instant::now(),
+                                _queued_at: Instant::now(),
                             };
 
                             let mut queue = pending_queue.lock().await;
@@ -2725,7 +2725,7 @@ impl MessagingDaemon {
     async fn send_group_message_to_peer(
         address: &str,
         payload: &crate::protocol::GroupMessagePayload,
-        sessions: &Arc<RwLock<HashMap<String, PeerSession>>>,
+        _sessions: &Arc<RwLock<HashMap<String, PeerSession>>>,
         tor_config: &TorConnectionConfig,
     ) -> Result<()> {
         let peer_addr = OnionAddress::from_string(address)
@@ -3124,7 +3124,7 @@ impl MessagingDaemon {
         group_sessions: &Arc<RwLock<HashMap<[u8; 32], crate::messaging::group_session::GroupSession>>>,
         identity: &TorIdentity,
         database: &Arc<TokioMutex<Database>>,
-        user_id: i64,
+        _user_id: i64,
         pending_join_invites: &Arc<RwLock<HashMap<[u8; 32], crate::protocol::GroupInvitePayload>>>,
     ) -> Result<()> {
         let payload = crate::protocol::GroupJoinAcceptPayload::from_bytes(&packet.payload)?;

@@ -9,7 +9,7 @@
 //! - Mesh topology maintenance
 
 use crate::crypto::{
-    decrypt_group_message, derive_epoch_key, encrypt_group_message, generate_group_id,
+    derive_epoch_key, generate_group_id,
     generate_initial_group_key, generate_invite_id, generate_member_id, generate_message_id,
     generate_random_nonce, sign_invite_token, verify_invite_token,
 };
@@ -18,12 +18,11 @@ use crate::identity::TorIdentity;
 use crate::messaging::group_gossip::{GossipManager, ReceivedGroupMessage};
 use crate::messaging::group_mesh::{MeshTopology, DEFAULT_NEIGHBOR_COUNT};
 use crate::protocol::{
-    GroupInvitePayload, GroupJoinAcceptPayload, GroupMember, GroupMessagePayload, GroupPolicy,
+    GroupInvitePayload, GroupMember, GroupMessagePayload, GroupPolicy,
 };
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use zeroize::Zeroizing;
 
 /// Group state.

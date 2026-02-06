@@ -7,9 +7,7 @@
 //! - Blind membership mode (only know neighbors)
 //! - Neighbor health tracking
 
-use crate::error::{Error, Result};
 use crate::protocol::GroupMember;
-use crate::tor::TorConnection;
 use rand::seq::SliceRandom;
 use rand::rngs::OsRng;
 use std::collections::HashMap;
@@ -79,7 +77,7 @@ impl NeighborInfo {
 /// Manages neighbor connections for a group's gossip mesh network.
 pub struct MeshTopology {
     /// Group ID this mesh belongs to.
-    group_id: [u8; 32],
+    _group_id: [u8; 32],
     /// Current neighbors (member_id -> info).
     neighbors: HashMap<[u8; 16], NeighborInfo>,
     /// Target number of neighbors to maintain.
@@ -94,7 +92,7 @@ impl MeshTopology {
     /// Create a new mesh topology manager.
     pub fn new(group_id: [u8; 32], target_neighbors: usize) -> Self {
         Self {
-            group_id,
+            _group_id: group_id,
             neighbors: HashMap::new(),
             target_neighbor_count: target_neighbors.max(MIN_NEIGHBOR_COUNT),
             last_rotation: Instant::now(),
@@ -288,7 +286,7 @@ impl MeshTopology {
 /// This provides stronger privacy guarantees against traffic analysis.
 pub struct BlindMembershipManager {
     /// Our member ID.
-    our_member_id: [u8; 16],
+    _our_member_id: [u8; 16],
     /// Known neighbors (member_id -> member info).
     known_neighbors: HashMap<[u8; 16], GroupMember>,
     /// Last time we requested new neighbors.
@@ -299,7 +297,7 @@ impl BlindMembershipManager {
     /// Create a new blind membership manager.
     pub fn new(our_member_id: [u8; 16]) -> Self {
         Self {
-            our_member_id,
+            _our_member_id: our_member_id,
             known_neighbors: HashMap::new(),
             last_neighbor_request: None,
         }

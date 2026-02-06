@@ -608,7 +608,10 @@ impl GroupMessagePayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MemberAction {
     /// Member joined the group.
-    Joined { pubkey: [u8; 32] },
+    Joined {
+        /// The public key of the member who joined.
+        pubkey: [u8; 32],
+    },
     /// Member left the group.
     Left,
     /// Member promoted to admin.

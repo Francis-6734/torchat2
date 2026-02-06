@@ -14,7 +14,6 @@ use axum_extra::extract::Multipart;
 use serde::Serialize;
 use std::sync::Arc;
 use tracing::{info, warn};
-use base64::Engine;
 
 use crate::models::*;
 use torchat_core::identity::{generate_identity, TorIdentity};
