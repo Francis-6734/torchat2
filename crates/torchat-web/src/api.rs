@@ -5,13 +5,16 @@
 
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
+    extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
     http::{header, header::SET_COOKIE, HeaderMap, StatusCode},
     Json,
     response::{IntoResponse, Response},
 };
+use futures_util::{SinkExt, StreamExt};
+use tokio::sync::broadcast;
 use axum_extra::extract::Multipart;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -684,6 +687,9 @@ pub async fn get_messages(
 
     let db = state.database.lock().await;
 
+    // Lazily clean up expired disappearing messages
+    let _ = db.cleanup_expired_messages();
+
     // Get messages for this contact from the simple_messages table
     match db.get_simple_messages_by_address(user_id, &contact_address, 100) {
         Ok(messages) => {
@@ -695,6 +701,7 @@ pub async fn get_messages(
                     timestamp: m.timestamp,
                     is_outgoing: m.is_outgoing,
                     status: if m.is_outgoing { "sent".to_string() } else { "received".to_string() },
+                    disappear_after: m.disappear_after,
                 })
                 .collect();
             (StatusCode::OK, Json(ApiResponse::ok(api_messages)))
@@ -706,6 +713,150 @@ pub async fn get_messages(
                     success: false,
                     data: None,
                     error: Some(format!("Failed to get messages: {}", e)),
+                }),
+            )
+        }
+    }
+}
+
+/// Search messages in a P2P conversation
+pub async fn search_messages(
+    headers: HeaderMap,
+    Path(contact_address): Path<String>,
+    Query(query): Query<SearchQuery>,
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<ApiResponse<Vec<Message>>>) {
+    let (user_id, _, _) = match get_current_user(&headers, &state).await {
+        Ok(user) => user,
+        Err((status, json)) => {
+            return (status, Json(ApiResponse {
+                success: false,
+                data: None,
+                error: json.0.error,
+            }));
+        }
+    };
+
+    if query.q.trim().is_empty() {
+        return (StatusCode::OK, Json(ApiResponse::ok(vec![])));
+    }
+
+    let db = state.database.lock().await;
+
+    match db.search_messages_by_address(user_id, &contact_address, &query.q, 50) {
+        Ok(messages) => {
+            let api_messages: Vec<Message> = messages
+                .into_iter()
+                .map(|m| Message {
+                    id: m.id.to_string(),
+                    content: m.content,
+                    timestamp: m.timestamp,
+                    is_outgoing: m.is_outgoing,
+                    status: if m.is_outgoing { "sent".to_string() } else { "received".to_string() },
+                    disappear_after: m.disappear_after,
+                })
+                .collect();
+            (StatusCode::OK, Json(ApiResponse::ok(api_messages)))
+        }
+        Err(e) => {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some(format!("Search failed: {}", e)),
+                }),
+            )
+        }
+    }
+}
+
+/// Search messages in a group conversation
+pub async fn search_group_messages_endpoint(
+    headers: HeaderMap,
+    Path(group_id): Path<String>,
+    Query(query): Query<SearchQuery>,
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<ApiResponse<Vec<GroupMessageInfo>>>) {
+    let session_token = match extract_session_token(&headers) {
+        Some(token) => token,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("No session token".to_string()),
+                }),
+            );
+        }
+    };
+
+    let db = state.database.lock().await;
+    let (_user_id, identity, _display_name) = match db.get_user_by_session(&session_token) {
+        Ok(Some(user)) => user,
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid session".to_string()),
+                }),
+            );
+        }
+    };
+
+    let group_id_bytes = match hex::decode(&group_id) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid group ID format".to_string()),
+                }),
+            );
+        }
+    };
+
+    if query.q.trim().is_empty() {
+        return (StatusCode::OK, Json(ApiResponse::ok(vec![])));
+    }
+
+    let our_pubkey = identity.public_key().to_bytes();
+    let our_member_id = torchat_core::crypto::generate_member_id(&group_id_bytes, &our_pubkey);
+
+    match db.search_group_messages(&group_id_bytes, &query.q, 50) {
+        Ok(messages) => {
+            let message_infos: Vec<GroupMessageInfo> = messages
+                .into_iter()
+                .map(|msg| {
+                    let is_outgoing = msg.sender_id == our_member_id;
+                    GroupMessageInfo {
+                        message_id: hex::encode(msg.id),
+                        sender_id: hex::encode(msg.sender_id),
+                        content: msg.content,
+                        timestamp: msg.timestamp,
+                        outgoing: is_outgoing,
+                        disappear_after: msg.disappear_after,
+                    }
+                })
+                .collect();
+            (StatusCode::OK, Json(ApiResponse::ok(message_infos)))
+        }
+        Err(e) => {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some(format!("Search failed: {}", e)),
                 }),
             )
         }
@@ -736,7 +887,7 @@ pub async fn send_message(
     // Store message in database
     {
         let db = state.database.lock().await;
-        match db.store_simple_message_by_address(user_id, &request.to, &request.content, true) {
+        match db.store_simple_message_by_address(user_id, &request.to, &request.content, true, request.disappear_after) {
             Ok(id) => msg_id = id,
             Err(e) => {
                 return (
@@ -785,6 +936,7 @@ pub async fn send_message(
         timestamp,
         is_outgoing: true,
         status: "sending".to_string(),
+        disappear_after: request.disappear_after,
     };
 
     (StatusCode::CREATED, Json(ApiResponse::ok(message)))
@@ -2553,6 +2705,7 @@ pub async fn send_group_message(
     if let Err(e) = daemon.command_sender().send(DaemonCommand::SendGroupMessage {
         group_id: group_id_bytes,
         content: request.content.clone(),
+        disappear_after: request.disappear_after,
     }).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2654,6 +2807,7 @@ pub async fn get_group_messages(
                 content: msg.content,
                 timestamp: msg.timestamp,
                 outgoing: is_outgoing,
+                disappear_after: msg.disappear_after,
             }
         })
         .collect();
@@ -2921,6 +3075,26 @@ pub async fn accept_pending_invite(
     // Store a preliminary group record so it appears in the groups list immediately
     let our_pubkey = identity.public_key().to_bytes();
     let our_member_id = torchat_core::crypto::generate_member_id(&invite.group_id, &our_pubkey);
+
+    // Check if this member has been banned from the group
+    match db.is_member_banned(&invite.group_id, &our_member_id) {
+        Ok(true) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("You have been banned from this group".to_string()),
+                }),
+            );
+        }
+        Err(e) => {
+            warn!(user_id, invite_id, error = %e, "Failed to check ban status");
+            // Continue anyway - don't block join on check failure
+        }
+        _ => {}
+    }
+
     if let Err(e) = db.store_preliminary_group(&invite.group_id, &group_name, &invite.inviter_pubkey, &our_member_id) {
         warn!(user_id, invite_id, error = %e, "Failed to store preliminary group record");
     }
@@ -3345,6 +3519,401 @@ pub async fn promote_member(
         StatusCode::OK,
         Json(ApiResponse::ok("Member promoted to admin".to_string())),
     )
+}
+
+/// Remove or ban a member from a group
+pub async fn remove_member(
+    headers: HeaderMap,
+    Path(group_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<RemoveMemberRequest>,
+) -> (StatusCode, Json<ApiResponse<String>>) {
+    let session_token = match extract_session_token(&headers) {
+        Some(token) => token,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("No session token".to_string()),
+                }),
+            );
+        }
+    };
+
+    let db = state.database.lock().await;
+    let (user_id, identity, _display_name) = match db.get_user_by_session(&session_token) {
+        Ok(Some(user)) => user,
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid session".to_string()),
+                }),
+            );
+        }
+    };
+
+    let group_id_bytes = match hex::decode(&group_id) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid group ID format".to_string()),
+                }),
+            );
+        }
+    };
+
+    let target_member_id = match hex::decode(&request.member_id) {
+        Ok(bytes) if bytes.len() == 16 => {
+            let mut arr = [0u8; 16];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid member ID format".to_string()),
+                }),
+            );
+        }
+    };
+
+    // Permission checks
+    let our_pubkey = identity.public_key().to_bytes();
+    let group_meta = match db.load_group_metadata(&group_id_bytes) {
+        Ok(Some(meta)) => meta,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Group not found".to_string()),
+                }),
+            );
+        }
+        Err(e) => {
+            warn!(user_id, error = %e, "Failed to load group metadata");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Failed to load group".to_string()),
+                }),
+            );
+        }
+    };
+
+    let founder_pubkey = group_meta.1;
+    let is_founder = our_pubkey == founder_pubkey;
+    let our_member_id = torchat_core::crypto::generate_member_id(&group_id_bytes, &our_pubkey);
+
+    // Cannot remove yourself - use leave instead
+    if target_member_id == our_member_id {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some("Cannot remove yourself. Use 'Leave Group' instead.".to_string()),
+            }),
+        );
+    }
+
+    // Check caller permissions
+    let is_admin = db.load_group_members(&group_id_bytes)
+        .unwrap_or_default()
+        .iter()
+        .any(|m| m.member_id == our_member_id && m.is_admin);
+
+    if !is_founder && !is_admin {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some("Only founders and admins can remove members".to_string()),
+            }),
+        );
+    }
+
+    // Admins cannot remove other admins or the founder
+    if !is_founder {
+        let target_is_founder = {
+            let founder_member_id = torchat_core::crypto::generate_member_id(&group_id_bytes, &founder_pubkey);
+            target_member_id == founder_member_id
+        };
+        let target_is_admin = db.load_group_members(&group_id_bytes)
+            .unwrap_or_default()
+            .iter()
+            .any(|m| m.member_id == target_member_id && m.is_admin);
+
+        if target_is_founder || target_is_admin {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Admins can only remove regular members".to_string()),
+                }),
+            );
+        }
+    }
+
+    drop(db);
+
+    // Send command to daemon
+    let daemons = state.daemons.lock().await;
+    let daemon = match daemons.get(&user_id) {
+        Some(d) => d.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Daemon not running".to_string()),
+                }),
+            );
+        }
+    };
+    drop(daemons);
+
+    use torchat_core::messaging::DaemonCommand;
+    let is_ban = request.ban.unwrap_or(false);
+
+    let cmd = if is_ban {
+        DaemonCommand::BanMember {
+            group_id: group_id_bytes,
+            member_id: target_member_id,
+            reason: request.reason.clone(),
+        }
+    } else {
+        DaemonCommand::RemoveMember {
+            group_id: group_id_bytes,
+            member_id: target_member_id,
+        }
+    };
+
+    if let Err(e) = daemon.command_sender().send(cmd).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Failed to remove member: {}", e)),
+            }),
+        );
+    }
+
+    let msg = if is_ban { "Member banned" } else { "Member removed" };
+    info!(group_id, member_id = %request.member_id, action = msg, "Member action completed");
+
+    (StatusCode::OK, Json(ApiResponse::ok(msg.to_string())))
+}
+
+/// List banned members for a group
+pub async fn list_group_bans(
+    headers: HeaderMap,
+    Path(group_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<ApiResponse<Vec<BanInfo>>>) {
+    let session_token = match extract_session_token(&headers) {
+        Some(token) => token,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("No session token".to_string()),
+                }),
+            );
+        }
+    };
+
+    let db = state.database.lock().await;
+    let (_user_id, identity, _display_name) = match db.get_user_by_session(&session_token) {
+        Ok(Some(user)) => user,
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid session".to_string()),
+                }),
+            );
+        }
+    };
+
+    let group_id_bytes = match hex::decode(&group_id) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Invalid group ID format".to_string()),
+                }),
+            );
+        }
+    };
+
+    // Check caller is founder or admin
+    let our_pubkey = identity.public_key().to_bytes();
+    let our_member_id = torchat_core::crypto::generate_member_id(&group_id_bytes, &our_pubkey);
+    let group_meta = match db.load_group_metadata(&group_id_bytes) {
+        Ok(Some(meta)) => meta,
+        _ => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse { success: false, data: None, error: Some("Group not found".to_string()) }),
+            );
+        }
+    };
+    let is_founder = our_pubkey == group_meta.1;
+    let is_admin = db.load_group_members(&group_id_bytes)
+        .unwrap_or_default()
+        .iter()
+        .any(|m| m.member_id == our_member_id && m.is_admin);
+
+    if !is_founder && !is_admin {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiResponse { success: false, data: None, error: Some("Only founders and admins can view bans".to_string()) }),
+        );
+    }
+
+    match db.list_group_bans(&group_id_bytes) {
+        Ok(bans) => {
+            let ban_infos: Vec<BanInfo> = bans
+                .into_iter()
+                .map(|b| BanInfo {
+                    member_id: hex::encode(b.member_id),
+                    reason: b.reason,
+                    banned_at: b.banned_at,
+                })
+                .collect();
+            (StatusCode::OK, Json(ApiResponse::ok(ban_infos)))
+        }
+        Err(e) => {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse { success: false, data: None, error: Some(format!("Failed to list bans: {}", e)) }),
+            )
+        }
+    }
+}
+
+/// Unban a member from a group
+pub async fn unban_member(
+    headers: HeaderMap,
+    Path(group_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<UnbanMemberRequest>,
+) -> (StatusCode, Json<ApiResponse<String>>) {
+    let session_token = match extract_session_token(&headers) {
+        Some(token) => token,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse { success: false, data: None, error: Some("No session token".to_string()) }),
+            );
+        }
+    };
+
+    let db = state.database.lock().await;
+    let (_user_id, identity, _display_name) = match db.get_user_by_session(&session_token) {
+        Ok(Some(user)) => user,
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse { success: false, data: None, error: Some("Invalid session".to_string()) }),
+            );
+        }
+    };
+
+    let group_id_bytes = match hex::decode(&group_id) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse { success: false, data: None, error: Some("Invalid group ID format".to_string()) }),
+            );
+        }
+    };
+
+    let member_id_bytes = match hex::decode(&request.member_id) {
+        Ok(bytes) if bytes.len() == 16 => {
+            let mut arr = [0u8; 16];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse { success: false, data: None, error: Some("Invalid member ID format".to_string()) }),
+            );
+        }
+    };
+
+    // Only founder can unban
+    let our_pubkey = identity.public_key().to_bytes();
+    let group_meta = match db.load_group_metadata(&group_id_bytes) {
+        Ok(Some(meta)) => meta,
+        _ => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse { success: false, data: None, error: Some("Group not found".to_string()) }),
+            );
+        }
+    };
+
+    if our_pubkey != group_meta.1 {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiResponse { success: false, data: None, error: Some("Only the founder can unban members".to_string()) }),
+        );
+    }
+
+    match db.unban_group_member(&group_id_bytes, &member_id_bytes) {
+        Ok(()) => {
+            info!(group_id, member_id = %request.member_id, "Unbanned member");
+            (StatusCode::OK, Json(ApiResponse::ok("Member unbanned".to_string())))
+        }
+        Err(e) => {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse { success: false, data: None, error: Some(format!("Failed to unban: {}", e)) }),
+            )
+        }
+    }
 }
 
 // ==========================================
@@ -3782,4 +4351,289 @@ pub async fn serve_group_file(
         .header(header::CONTENT_LENGTH, file_bytes.len().to_string())
         .body(Body::from(file_bytes))
         .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Server error").into_response())
+}
+
+// ========================================
+// WebSocket Real-Time Push
+// ========================================
+
+/// Query params for WebSocket authentication
+#[derive(Debug, Deserialize)]
+pub struct WsAuthParams {
+    pub token: String,
+}
+
+/// WebSocket upgrade handler.
+/// Authenticates via `?token=<session_token>` query parameter,
+/// then subscribes to the user's daemon events and pushes JSON messages.
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    Query(params): Query<WsAuthParams>,
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    // Authenticate the session token before upgrading
+    let db = state.database.lock().await;
+    let user_info = db.get_user_by_session(&params.token);
+    drop(db);
+
+    let (user_id, _identity, _display_name) = match user_info {
+        Ok(Some(user)) => user,
+        _ => {
+            return (StatusCode::UNAUTHORIZED, "Invalid session token").into_response();
+        }
+    };
+
+    ws.on_upgrade(move |socket| handle_ws_connection(socket, user_id, state))
+}
+
+/// Handle an established WebSocket connection.
+/// Subscribes to the user's daemon broadcast channel and forwards events.
+async fn handle_ws_connection(
+    socket: WebSocket,
+    user_id: i64,
+    state: Arc<AppState>,
+) {
+    let (mut ws_tx, mut ws_rx) = socket.split();
+
+    // Try to get the daemon's event subscription
+    let event_rx = {
+        let daemons = state.daemons.lock().await;
+        daemons.get(&user_id).map(|d| d.subscribe())
+    };
+
+    let mut event_rx = match event_rx {
+        Some(rx) => rx,
+        None => {
+            // Daemon not running -- send an error event and close
+            let error_event = WsEvent {
+                event_type: "error".to_string(),
+                data: serde_json::json!({ "message": "Daemon not running" }),
+            };
+            let _ = ws_tx.send(WsMessage::Text(
+                serde_json::to_string(&error_event).unwrap_or_default().into(),
+            )).await;
+            let _ = ws_tx.close().await;
+            return;
+        }
+    };
+
+    // Send a "connected" event to confirm the WebSocket is live
+    let connected_event = WsEvent {
+        event_type: "connected".to_string(),
+        data: serde_json::json!({ "user_id": user_id }),
+    };
+    if ws_tx.send(WsMessage::Text(
+        serde_json::to_string(&connected_event).unwrap_or_default().into(),
+    )).await.is_err() {
+        return;
+    }
+
+    // Spawn a task to read from the client (handles close frames)
+    let mut read_handle = tokio::spawn(async move {
+        while let Some(msg) = ws_rx.next().await {
+            match msg {
+                Ok(WsMessage::Close(_)) | Err(_) => break,
+                _ => {
+                    // Client-to-server messages not used yet
+                }
+            }
+        }
+    });
+
+    // Main loop: receive daemon events and push to WebSocket
+    loop {
+        tokio::select! {
+            event_result = event_rx.recv() => {
+                match event_result {
+                    Ok(event) => {
+                        if let Some(ws_event) = daemon_event_to_ws_event(event) {
+                            let json = match serde_json::to_string(&ws_event) {
+                                Ok(j) => j,
+                                Err(_) => continue,
+                            };
+                            if ws_tx.send(WsMessage::Text(json.into())).await.is_err() {
+                                break; // Client disconnected
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        // We fell behind; notify client to do a full refresh
+                        let lag_event = WsEvent {
+                            event_type: "lagged".to_string(),
+                            data: serde_json::json!({ "missed": n }),
+                        };
+                        let _ = ws_tx.send(WsMessage::Text(
+                            serde_json::to_string(&lag_event).unwrap_or_default().into(),
+                        )).await;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        // Daemon stopped
+                        let stopped = WsEvent {
+                            event_type: "daemon_stopped".to_string(),
+                            data: serde_json::json!({}),
+                        };
+                        let _ = ws_tx.send(WsMessage::Text(
+                            serde_json::to_string(&stopped).unwrap_or_default().into(),
+                        )).await;
+                        break;
+                    }
+                }
+            }
+            _ = &mut read_handle => {
+                // Client disconnected (read task finished)
+                break;
+            }
+        }
+    }
+
+    let _ = ws_tx.close().await;
+}
+
+/// Convert a DaemonEvent to a WsEvent suitable for the browser.
+/// Returns None for internal-only events that the frontend does not need.
+fn daemon_event_to_ws_event(event: torchat_core::messaging::DaemonEvent) -> Option<WsEvent> {
+    use torchat_core::messaging::DaemonEvent;
+
+    match event {
+        DaemonEvent::MessageReceived { from, message_id, content, timestamp } => Some(WsEvent {
+            event_type: "message_received".to_string(),
+            data: serde_json::json!({
+                "from": from,
+                "message_id": hex::encode(message_id),
+                "content": content,
+                "timestamp": timestamp,
+            }),
+        }),
+        DaemonEvent::MessageDelivered { message_id } => Some(WsEvent {
+            event_type: "message_delivered".to_string(),
+            data: serde_json::json!({
+                "message_id": hex::encode(message_id),
+            }),
+        }),
+        DaemonEvent::MessageFailed { message_id, error } => Some(WsEvent {
+            event_type: "message_failed".to_string(),
+            data: serde_json::json!({
+                "message_id": hex::encode(message_id),
+                "error": error,
+            }),
+        }),
+        DaemonEvent::GroupMessageReceived { group_id, sender_id, content, timestamp } => Some(WsEvent {
+            event_type: "group_message_received".to_string(),
+            data: serde_json::json!({
+                "group_id": hex::encode(group_id),
+                "sender_id": hex::encode(sender_id),
+                "content": content,
+                "timestamp": timestamp,
+            }),
+        }),
+        DaemonEvent::GroupJoined { group_id, name } => Some(WsEvent {
+            event_type: "group_joined".to_string(),
+            data: serde_json::json!({
+                "group_id": hex::encode(group_id),
+                "name": name,
+            }),
+        }),
+        DaemonEvent::GroupMemberJoined { group_id, member_id } => Some(WsEvent {
+            event_type: "group_member_joined".to_string(),
+            data: serde_json::json!({
+                "group_id": hex::encode(group_id),
+                "member_id": hex::encode(member_id),
+            }),
+        }),
+        DaemonEvent::GroupMemberLeft { group_id, member_id } => Some(WsEvent {
+            event_type: "group_member_left".to_string(),
+            data: serde_json::json!({
+                "group_id": hex::encode(group_id),
+                "member_id": hex::encode(member_id),
+            }),
+        }),
+        DaemonEvent::GroupInviteReceived { invite } => {
+            let group_name = String::from_utf8(invite.encrypted_metadata.clone())
+                .ok()
+                .and_then(|s| s.split('|').next().map(|n| n.to_string()));
+            Some(WsEvent {
+                event_type: "group_invite_received".to_string(),
+                data: serde_json::json!({
+                    "group_id": hex::encode(invite.group_id),
+                    "group_name": group_name,
+                }),
+            })
+        },
+        DaemonEvent::FileTransferCompleted { transfer_id, filename, from, size, .. } => Some(WsEvent {
+            event_type: "file_received".to_string(),
+            data: serde_json::json!({
+                "transfer_id": hex::encode(transfer_id),
+                "filename": filename,
+                "from": from,
+                "size": size,
+            }),
+        }),
+        DaemonEvent::FileTransferFailed { transfer_id, error } => Some(WsEvent {
+            event_type: "file_transfer_failed".to_string(),
+            data: serde_json::json!({
+                "transfer_id": hex::encode(transfer_id),
+                "error": error,
+            }),
+        }),
+        DaemonEvent::GroupFileShared { group_id, file_id, filename, size, sender_onion } => Some(WsEvent {
+            event_type: "group_file_shared".to_string(),
+            data: serde_json::json!({
+                "group_id": hex::encode(group_id),
+                "file_id": file_id,
+                "filename": filename,
+                "size": size,
+                "sender_onion": sender_onion,
+            }),
+        }),
+        DaemonEvent::GroupFileDownloaded { group_id, file_id, .. } => Some(WsEvent {
+            event_type: "group_file_downloaded".to_string(),
+            data: serde_json::json!({
+                "group_id": hex::encode(group_id),
+                "file_id": file_id,
+            }),
+        }),
+        DaemonEvent::GroupFileDownloadFailed { group_id, file_id, error } => Some(WsEvent {
+            event_type: "group_file_download_failed".to_string(),
+            data: serde_json::json!({
+                "group_id": hex::encode(group_id),
+                "file_id": file_id,
+                "error": error,
+            }),
+        }),
+        DaemonEvent::PeerConnected { address } => Some(WsEvent {
+            event_type: "peer_connected".to_string(),
+            data: serde_json::json!({ "address": address }),
+        }),
+        DaemonEvent::PeerDisconnected { address } => Some(WsEvent {
+            event_type: "peer_disconnected".to_string(),
+            data: serde_json::json!({ "address": address }),
+        }),
+        DaemonEvent::Started { onion_address } => Some(WsEvent {
+            event_type: "daemon_started".to_string(),
+            data: serde_json::json!({ "onion_address": onion_address }),
+        }),
+        DaemonEvent::Stopped => Some(WsEvent {
+            event_type: "daemon_stopped".to_string(),
+            data: serde_json::json!({}),
+        }),
+        DaemonEvent::GroupCreated { group_id, name } => Some(WsEvent {
+            event_type: "group_created".to_string(),
+            data: serde_json::json!({
+                "group_id": hex::encode(group_id),
+                "name": name,
+            }),
+        }),
+        // Internal events not relevant to the frontend
+        DaemonEvent::AckReceived { .. }
+        | DaemonEvent::Error { .. }
+        | DaemonEvent::FileChunkReceived { .. }
+        | DaemonEvent::FileOfferReceived { .. }
+        | DaemonEvent::FileTransferStarted { .. }
+        | DaemonEvent::CallSignalReceived { .. }
+        | DaemonEvent::GroupInviteGenerated { .. }
+        | DaemonEvent::GroupInviteSent { .. }
+        | DaemonEvent::GroupKeyRotated { .. }
+        | DaemonEvent::GroupJoinAcceptReady { .. }
+        | DaemonEvent::GroupJoinAcceptReceived { .. } => None,
+    }
 }

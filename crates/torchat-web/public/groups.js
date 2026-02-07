@@ -280,6 +280,7 @@ async function openGroupChat(groupId, groupName, role) {
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
     document.getElementById('group-chat-panel').classList.add('active');
     await loadGroupMessages(groupId);
+    updateTtlButton('group');
     startGroupMessagePolling();
 
     // Update member count in header
@@ -353,12 +354,16 @@ async function loadGroupMessages(groupId, isPolling = false) {
                     }
                 }
 
+                const ttlInfo = msg.disappear_after
+                    ? `<span class="ttl-indicator" title="Disappears in ${formatTtlRemaining(msg.timestamp, msg.disappear_after)}">&#9201; ${formatTtlRemaining(msg.timestamp, msg.disappear_after)}</span>`
+                    : '';
+
                 return `
                     <div class="message ${isOurs ? 'sent' : 'received'}">
                         <div class="message-bubble">
                             ${!isOurs ? `<div class="message-sender">${senderLabel}</div>` : ''}
                             ${escapeHtml(msg.content)}
-                            <div class="message-time">${formatTime(msg.timestamp)}</div>
+                            <div class="message-time">${formatTime(msg.timestamp)}${ttlInfo}</div>
                         </div>
                     </div>
                 `;
@@ -368,6 +373,8 @@ async function loadGroupMessages(groupId, isPolling = false) {
 
             if (isPolling && messages.length > previousCount && !messages[messages.length - 1].outgoing) {
                 showToast('New group message!');
+                playNotificationSound();
+                sendDesktopNotification('Group Message', currentGroup?.name || 'New group message');
             }
         }
     } else if (!isPolling) {
@@ -377,6 +384,7 @@ async function loadGroupMessages(groupId, isPolling = false) {
 }
 
 function startGroupMessagePolling() {
+    if (typeof wsConnected !== 'undefined' && wsConnected) return; // WebSocket handles real-time updates
     if (groupMessagePollingInterval) clearInterval(groupMessagePollingInterval);
     groupMessagePollingInterval = setInterval(() => {
         if (currentGroup) {
@@ -411,7 +419,8 @@ async function sendGroupMessage() {
     input.value = '';
     input.style.height = 'auto';
 
-    const result = await api(`/api/groups/${currentGroup.id}/messages`, 'POST', { content });
+    const ttl = getTtl('group', currentGroup.id);
+    const result = await api(`/api/groups/${currentGroup.id}/messages`, 'POST', { content, disappear_after: ttl });
     msgEl.querySelector('.message-time').textContent = result.success ? 'Sent' : 'Failed';
     if (!result.success) {
         showToast('Failed to send: ' + (result.error || 'Unknown error'));
@@ -611,6 +620,52 @@ async function promoteToAdmin(groupId, memberId, memberEl) {
     }
 }
 
+async function removeMember(groupId, memberId, memberEl) {
+    if (!confirm('Remove this member from the group?')) return;
+    if (memberEl) {
+        memberEl.style.opacity = '0.5';
+        memberEl.style.pointerEvents = 'none';
+    }
+    const result = await api(`/api/groups/${groupId}/remove`, {
+        method: 'POST',
+        body: JSON.stringify({ member_id: memberId, ban: false }),
+    });
+    if (result.success) {
+        showToast('Member removed');
+        // Refresh the modal
+        openMembersModal(groupId);
+    } else {
+        if (memberEl) {
+            memberEl.style.opacity = '1';
+            memberEl.style.pointerEvents = 'auto';
+        }
+        showToast('Failed to remove: ' + (result.error || 'Unknown error'));
+    }
+}
+
+async function banMember(groupId, memberId, memberEl) {
+    const reason = prompt('Ban reason (optional):');
+    if (reason === null) return; // User cancelled
+    if (memberEl) {
+        memberEl.style.opacity = '0.5';
+        memberEl.style.pointerEvents = 'none';
+    }
+    const result = await api(`/api/groups/${groupId}/remove`, {
+        method: 'POST',
+        body: JSON.stringify({ member_id: memberId, ban: true, reason: reason || null }),
+    });
+    if (result.success) {
+        showToast('Member banned');
+        openMembersModal(groupId);
+    } else {
+        if (memberEl) {
+            memberEl.style.opacity = '1';
+            memberEl.style.pointerEvents = 'auto';
+        }
+        showToast('Failed to ban: ' + (result.error || 'Unknown error'));
+    }
+}
+
 async function openMembersModal(groupId) {
     const members = await loadGroupMembers(groupId);
     const isFounder = currentGroup && currentGroup.role === 'founder';
@@ -639,13 +694,38 @@ async function openMembersModal(groupId) {
                 ? `<button class="promote-btn" onclick="promoteToAdmin('${groupId}', '${m.member_id}', this.closest('.member-item'))">Make Admin</button>`
                 : '';
 
+            // Build action buttons based on role permissions
+            let actionBtns = '';
+            const isAdmin = currentGroup && currentGroup.role === 'admin';
+            const isSelf = m.member_id === currentGroup?.my_member_id;
+
+            if (!isSelf) {
+                if (isFounder && m.role !== 'founder') {
+                    // Founder can remove/ban anyone except self
+                    actionBtns = `
+                        <div class="member-actions">
+                            <button class="remove-btn" onclick="removeMember('${groupId}', '${m.member_id}', this.closest('.member-item'))">Remove</button>
+                            <button class="ban-btn" onclick="banMember('${groupId}', '${m.member_id}', this.closest('.member-item'))">Ban</button>
+                        </div>`;
+                } else if (isAdmin && m.role === 'member') {
+                    // Admin can remove regular members only
+                    actionBtns = `
+                        <div class="member-actions">
+                            <button class="remove-btn" onclick="removeMember('${groupId}', '${m.member_id}', this.closest('.member-item'))">Remove</button>
+                        </div>`;
+                }
+            }
+
             return `
                 <div class="member-item">
                     <div class="member-info">
                         <div class="member-addr">${addr}</div>
                         ${roleLabel}
                     </div>
-                    ${promoteBtn}
+                    <div style="display: flex; gap: 6px; align-items: center;">
+                        ${promoteBtn}
+                        ${actionBtns}
+                    </div>
                 </div>
             `;
         }).join('')
@@ -742,6 +822,7 @@ function openGroupMenu() {
 let invitePollingInterval = null;
 
 function startInvitePolling() {
+    if (typeof wsConnected !== 'undefined' && wsConnected) return; // WebSocket handles real-time updates
     if (invitePollingInterval) clearInterval(invitePollingInterval);
     invitePollingInterval = setInterval(() => {
         // Only poll when on the groups tab
@@ -762,6 +843,70 @@ function stopInvitePolling() {
 // ========================================
 // Event Listeners
 // ========================================
+
+// ========================================
+// Group Message Search
+// ========================================
+
+let _groupSearchDebounce = null;
+let _isGroupSearching = false;
+
+function toggleGroupMessageSearch() {
+    const bar = document.getElementById('group-search-bar');
+    if (bar.style.display === 'none') {
+        bar.style.display = 'flex';
+        document.getElementById('group-search-input').focus();
+    } else {
+        closeGroupMessageSearch();
+    }
+}
+
+function closeGroupMessageSearch() {
+    document.getElementById('group-search-bar').style.display = 'none';
+    document.getElementById('group-search-input').value = '';
+    _isGroupSearching = false;
+    if (currentGroup) loadGroupMessages(currentGroup.id);
+}
+
+function debouncedSearchGroupMessages() {
+    clearTimeout(_groupSearchDebounce);
+    _groupSearchDebounce = setTimeout(searchGroupMessages, 300);
+}
+
+async function searchGroupMessages() {
+    const query = document.getElementById('group-search-input').value.trim();
+    if (!query || !currentGroup) {
+        if (!query && _isGroupSearching) {
+            _isGroupSearching = false;
+            loadGroupMessages(currentGroup.id);
+        }
+        return;
+    }
+    _isGroupSearching = true;
+    const container = document.getElementById('group-messages-container');
+    const result = await api(`/api/groups/${currentGroup.id}/messages/search?q=${encodeURIComponent(query)}`);
+    const messages = (result.success && result.data) ? result.data : [];
+
+    if (messages.length > 0) {
+        container.innerHTML =
+            `<div class="search-result-count">${messages.length} result${messages.length !== 1 ? 's' : ''} found</div>` +
+            messages.map(msg => {
+                const isOurs = msg.outgoing;
+                const senderLabel = isOurs ? 'You' : (msg.sender_id.substring(0, 8) + '...');
+                return `
+                    <div class="message ${isOurs ? 'sent' : 'received'}">
+                        <div class="message-bubble">
+                            ${!isOurs ? `<div class="message-sender">${senderLabel}</div>` : ''}
+                            ${highlightText(msg.content, query)}
+                            <div class="message-time">${formatTime(msg.timestamp)}</div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+    } else {
+        container.innerHTML = '<div class="empty-state"><h3>No results</h3><p>No messages match your search</p></div>';
+    }
+}
 
 document.addEventListener('DOMContentLoaded', () => {
     // Start polling for invites

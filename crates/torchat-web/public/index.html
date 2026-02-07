@@ -442,6 +442,83 @@
             flex-shrink: 0;
         }
 
+        .ttl-btn {
+            background: none;
+            border: 1px solid rgba(102, 126, 234, 0.3);
+            color: #999;
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+            flex-shrink: 0;
+            transition: all 0.2s;
+            position: relative;
+        }
+
+        .ttl-btn.active {
+            background: rgba(231, 76, 60, 0.15);
+            border-color: rgba(231, 76, 60, 0.5);
+            color: #e74c3c;
+        }
+
+        .ttl-btn:hover { background: rgba(102, 126, 234, 0.1); }
+
+        .ttl-badge {
+            position: absolute;
+            top: -4px;
+            right: -4px;
+            background: #e74c3c;
+            color: white;
+            font-size: 8px;
+            padding: 1px 4px;
+            border-radius: 8px;
+            font-weight: bold;
+        }
+
+        .ttl-dropdown {
+            position: absolute;
+            bottom: 50px;
+            right: 0;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+            padding: 6px;
+            z-index: 200;
+            min-width: 140px;
+        }
+
+        .ttl-option {
+            display: block;
+            width: 100%;
+            padding: 8px 14px;
+            border: none;
+            background: none;
+            text-align: left;
+            cursor: pointer;
+            border-radius: 8px;
+            font-size: 13px;
+            color: #333;
+            transition: background 0.15s;
+        }
+
+        .ttl-option:hover { background: #f0f0f0; }
+        .ttl-option.selected { background: rgba(231, 76, 60, 0.1); color: #e74c3c; font-weight: 600; }
+
+        .ttl-indicator {
+            font-size: 10px;
+            color: rgba(255,255,255,0.7);
+            display: inline-flex;
+            align-items: center;
+            gap: 2px;
+            margin-left: 6px;
+        }
+
+        .message.received .ttl-indicator { color: rgba(0,0,0,0.4); }
+
         .file-message {
             display: flex;
             align-items: center;
@@ -754,6 +831,37 @@
         .promote-btn:hover {
             background: rgba(255, 255, 255, 0.25);
         }
+        .member-actions {
+            display: flex;
+            gap: 4px;
+            flex-shrink: 0;
+        }
+        .remove-btn {
+            padding: 4px 10px;
+            border: 1px solid rgba(231, 76, 60, 0.5);
+            background: rgba(231, 76, 60, 0.2);
+            color: #ff6b6b;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: background 0.2s;
+        }
+        .remove-btn:hover {
+            background: rgba(231, 76, 60, 0.4);
+        }
+        .ban-btn {
+            padding: 4px 10px;
+            border: 1px solid rgba(192, 57, 43, 0.5);
+            background: rgba(192, 57, 43, 0.2);
+            color: #e74c3c;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: background 0.2s;
+        }
+        .ban-btn:hover {
+            background: rgba(192, 57, 43, 0.4);
+        }
 
         .form-group {
             margin-bottom: 16px;
@@ -942,6 +1050,338 @@
             to { opacity: 1; transform: translate(-50%, 0); }
         }
 
+        /* Toggle Switch */
+        .toggle-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 0;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        .toggle-row:last-child {
+            border-bottom: none;
+        }
+        .toggle-label {
+            font-size: 15px;
+            font-weight: 500;
+            color: #333;
+        }
+        .toggle-sublabel {
+            font-size: 12px;
+            color: #888;
+            margin-top: 2px;
+        }
+        .toggle-switch {
+            position: relative;
+            width: 48px;
+            height: 26px;
+            flex-shrink: 0;
+        }
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: #ccc;
+            border-radius: 26px;
+            transition: 0.3s;
+        }
+        .toggle-slider:before {
+            content: "";
+            position: absolute;
+            height: 20px;
+            width: 20px;
+            left: 3px;
+            bottom: 3px;
+            background: white;
+            border-radius: 50%;
+            transition: 0.3s;
+        }
+        .toggle-switch input:checked + .toggle-slider {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        .toggle-switch input:checked + .toggle-slider:before {
+            transform: translateX(22px);
+        }
+        .notif-permission-btn {
+            padding: 6px 14px;
+            border: 1px solid #667eea;
+            background: transparent;
+            color: #667eea;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 500;
+            margin-left: 10px;
+            transition: all 0.2s;
+        }
+        .notif-permission-btn:hover {
+            background: #667eea;
+            color: white;
+        }
+        .notif-status {
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 4px;
+            margin-left: 10px;
+        }
+        .notif-status.granted {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+        .notif-status.denied {
+            background: #ffebee;
+            color: #c62828;
+        }
+
+        /* Search Bar */
+        .search-bar {
+            display: flex;
+            align-items: center;
+            padding: 8px 12px;
+            background: white;
+            border-bottom: 1px solid #e0e0e0;
+            gap: 8px;
+        }
+        .search-input {
+            flex: 1;
+            padding: 8px 14px;
+            border: 1px solid #e0e0e0;
+            border-radius: 20px;
+            font-size: 14px;
+            font-family: inherit;
+            outline: none;
+        }
+        .search-input:focus {
+            border-color: #667eea;
+        }
+        .search-close-btn {
+            background: none;
+            border: none;
+            font-size: 20px;
+            color: #888;
+            cursor: pointer;
+            padding: 4px 8px;
+            line-height: 1;
+        }
+        .search-close-btn:hover {
+            color: #333;
+        }
+        .search-toggle-btn {
+            background: none;
+            border: none;
+            font-size: 18px;
+            cursor: pointer;
+            padding: 4px 8px;
+            color: #667eea;
+            flex-shrink: 0;
+        }
+        .search-highlight {
+            background: rgba(102, 126, 234, 0.3);
+            border-radius: 2px;
+            padding: 0 1px;
+        }
+        .search-result-count {
+            font-size: 12px;
+            color: #888;
+            padding: 8px 16px;
+            text-align: center;
+            border-bottom: 1px solid #e0e0e0;
+            background: #fafafa;
+        }
+
+        /* Dark Mode */
+        body.dark-mode .app-container {
+            background: #1a1a2e;
+        }
+        body.dark-mode .tab-nav {
+            background: #16213e;
+            border-bottom-color: #2a3a5c;
+        }
+        body.dark-mode .tab-btn {
+            color: #aaa;
+        }
+        body.dark-mode .tab-btn.active {
+            color: #667eea;
+            border-bottom-color: #667eea;
+        }
+        body.dark-mode .contact-item,
+        body.dark-mode .settings-card,
+        body.dark-mode .chat-header,
+        body.dark-mode .input-area {
+            background: #1e2746;
+            border-color: #2a3a5c;
+        }
+        body.dark-mode .settings-card {
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+        body.dark-mode .contact-item {
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+        body.dark-mode .contact-name,
+        body.dark-mode .chat-contact-name {
+            color: #e0e0e0;
+        }
+        body.dark-mode .contact-address,
+        body.dark-mode .chat-contact-address {
+            color: #999;
+        }
+        body.dark-mode .settings-card h3 {
+            color: #999;
+        }
+        body.dark-mode .messages-container {
+            background: #0f1629;
+        }
+        body.dark-mode .message.received .message-bubble {
+            background: #1e2746;
+            color: #e0e0e0;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+        }
+        body.dark-mode .identity-full {
+            background: #0f1629;
+            color: #ccc;
+        }
+        body.dark-mode .form-group input,
+        body.dark-mode .message-input {
+            border-color: #333;
+            background: #16213e;
+            color: #e0e0e0;
+        }
+        body.dark-mode .form-group label {
+            color: #ccc;
+        }
+        body.dark-mode .btn-secondary {
+            background: #2a3a5c;
+            color: #ccc;
+        }
+        body.dark-mode .status-message.info {
+            background: rgba(21,101,192,0.2);
+            color: #90caf9;
+        }
+        body.dark-mode .status-message.error {
+            background: rgba(198,40,40,0.2);
+            color: #ef9a9a;
+        }
+        body.dark-mode .status-message.success {
+            background: rgba(46,125,50,0.2);
+            color: #a5d6a7;
+        }
+        body.dark-mode .empty-state {
+            color: #999;
+        }
+        body.dark-mode .empty-state h3 {
+            color: #aaa;
+        }
+        body.dark-mode .modal-content {
+            background: #1e2746;
+        }
+        body.dark-mode .modal-content h2 {
+            color: #e0e0e0;
+        }
+        body.dark-mode .toast {
+            background: #e0e0e0;
+            color: #1a1a2e;
+        }
+        body.dark-mode .attach-btn,
+        body.dark-mode .call-btn {
+            background: #2a3a5c;
+        }
+        body.dark-mode .ttl-btn {
+            border-color: rgba(102, 126, 234, 0.2);
+            color: #888;
+        }
+        body.dark-mode .ttl-btn.active {
+            background: rgba(231, 76, 60, 0.2);
+            border-color: rgba(231, 76, 60, 0.4);
+            color: #ff6b6b;
+        }
+        body.dark-mode .ttl-dropdown {
+            background: #1a2a4a;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+        }
+        body.dark-mode .ttl-option {
+            color: #ddd;
+        }
+        body.dark-mode .ttl-option:hover { background: rgba(255,255,255,0.1); }
+        body.dark-mode .ttl-option.selected { background: rgba(231, 76, 60, 0.2); color: #ff6b6b; }
+        body.dark-mode .contact-delete-btn {
+            color: #666;
+        }
+        body.dark-mode .contact-delete-btn:hover {
+            color: #e74c3c;
+            background: rgba(231, 76, 60, 0.15);
+        }
+        body.dark-mode .invite-item {
+            background: linear-gradient(135deg, rgba(102,126,234,0.1) 0%, rgba(118,75,162,0.1) 100%);
+            border-color: rgba(102,126,234,0.3);
+        }
+        body.dark-mode .invite-group-name {
+            color: #e0e0e0;
+        }
+        body.dark-mode .invite-decline-btn {
+            background: #2a3a5c;
+            color: #ccc;
+        }
+        body.dark-mode .fingerprint-display {
+            color: #999;
+        }
+        body.dark-mode .contact-status {
+            color: #8e9aef;
+        }
+        body.dark-mode .toggle-row {
+            border-bottom-color: #2a3a5c;
+        }
+        body.dark-mode .toggle-label {
+            color: #e0e0e0;
+        }
+        body.dark-mode .toggle-sublabel {
+            color: #888;
+        }
+        body.dark-mode .toggle-slider {
+            background: #444;
+        }
+        body.dark-mode .file-action-btn.open {
+            background: #2a3a5c;
+            color: #ccc;
+        }
+        body.dark-mode .spinner {
+            border-color: #2a3a5c;
+            border-top-color: #667eea;
+        }
+        body.dark-mode .message-sender {
+            color: #8e9aef;
+        }
+        body.dark-mode .file-icon {
+            background: rgba(102, 126, 234, 0.25);
+        }
+        body.dark-mode .search-bar {
+            background: #1e2746;
+            border-bottom-color: #2a3a5c;
+        }
+        body.dark-mode .search-input {
+            background: #16213e;
+            border-color: #333;
+            color: #e0e0e0;
+        }
+        body.dark-mode .search-close-btn {
+            color: #999;
+        }
+        body.dark-mode .search-close-btn:hover {
+            color: #e0e0e0;
+        }
+        body.dark-mode .search-highlight {
+            background: rgba(102, 126, 234, 0.5);
+        }
+        body.dark-mode .search-result-count {
+            background: #0f1629;
+            color: #999;
+            border-bottom-color: #2a3a5c;
+        }
+
         /* Desktop */
         @media (min-width: 768px) {
             body {
@@ -1039,6 +1479,42 @@
                         </div>
                     </div>
                     <div class="settings-card">
+                        <h3>Preferences</h3>
+                        <div class="toggle-row">
+                            <div>
+                                <div class="toggle-label">Dark Mode</div>
+                                <div class="toggle-sublabel">Switch to dark theme</div>
+                            </div>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="toggle-dark-mode" onchange="toggleDarkMode()">
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div class="toggle-row">
+                            <div>
+                                <div class="toggle-label">Notification Sounds</div>
+                                <div class="toggle-sublabel">Play sound on new messages</div>
+                            </div>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="toggle-notif-sound" onchange="toggleNotifSound()" checked>
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div class="toggle-row">
+                            <div>
+                                <div class="toggle-label">Desktop Notifications</div>
+                                <div class="toggle-sublabel" id="notif-permission-status">Click to enable</div>
+                            </div>
+                            <div style="display:flex;align-items:center;gap:6px;">
+                                <span id="notif-permission-badge"></span>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="toggle-desktop-notif" onchange="toggleDesktopNotif()">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="settings-card">
                         <h3>About</h3>
                         <p style="color: #666; font-size: 14px;">TorChat 2.0 - Anonymous messaging over Tor<br>End-to-end encrypted with Signal Protocol</p>
                     </div>
@@ -1053,6 +1529,11 @@
                         <div class="chat-contact-name" id="chat-contact-name">Contact</div>
                         <div class="chat-contact-address" id="chat-contact-address"></div>
                     </div>
+                    <button class="search-toggle-btn" onclick="toggleMessageSearch()" title="Search messages">&#128269;</button>
+                </div>
+                <div class="search-bar" id="chat-search-bar" style="display:none;">
+                    <input type="text" class="search-input" id="chat-search-input" placeholder="Search messages..." oninput="debouncedSearchMessages()">
+                    <button class="search-close-btn" onclick="closeMessageSearch()">&times;</button>
                 </div>
                 <div class="messages-container" id="messages-container"></div>
                 <div class="input-area">
@@ -1060,6 +1541,10 @@
                     <button class="attach-btn" onclick="document.getElementById('file-input').click()" title="Send file">&#128206;</button>
                     <button class="call-btn" onclick="startVoiceCall()" title="Voice call" id="call-btn">&#128222;</button>
                     <textarea class="message-input" id="message-input" placeholder="Type a message..." rows="1"></textarea>
+                    <div style="position: relative;">
+                        <button class="ttl-btn" id="ttl-btn" onclick="toggleTtlDropdown('p2p')" title="Disappearing messages">&#9201;</button>
+                        <div class="ttl-dropdown" id="ttl-dropdown-p2p" style="display:none;"></div>
+                    </div>
                     <button class="send-btn" onclick="sendMessage()">&#10148;</button>
                 </div>
             </div>
@@ -1072,14 +1557,23 @@
                         <div class="chat-contact-name" id="group-chat-name">Group</div>
                         <div class="chat-contact-address" id="group-chat-id"></div>
                     </div>
+                    <button class="search-toggle-btn" onclick="toggleGroupMessageSearch()" title="Search messages">&#128269;</button>
                     <button class="group-members-btn" onclick="if(currentGroup) openMembersModal(currentGroup.id)" title="View Members">&#128101;</button>
                     <button class="group-menu-btn" onclick="openGroupMenu()">&#8942;</button>
+                </div>
+                <div class="search-bar" id="group-search-bar" style="display:none;">
+                    <input type="text" class="search-input" id="group-search-input" placeholder="Search messages..." oninput="debouncedSearchGroupMessages()">
+                    <button class="search-close-btn" onclick="closeGroupMessageSearch()">&times;</button>
                 </div>
                 <div class="messages-container" id="group-messages-container"></div>
                 <div class="input-area">
                     <input type="file" id="group-file-input" style="display: none;" onchange="handleGroupFileSelect(event)">
                     <button class="attach-btn" onclick="document.getElementById('group-file-input').click()" title="Share file">&#128206;</button>
                     <textarea class="message-input" id="group-message-input" placeholder="Type a message..." rows="1"></textarea>
+                    <div style="position: relative;">
+                        <button class="ttl-btn" id="group-ttl-btn" onclick="toggleTtlDropdown('group')" title="Disappearing messages">&#9201;</button>
+                        <div class="ttl-dropdown" id="ttl-dropdown-group" style="display:none;"></div>
+                    </div>
                     <button class="send-btn" onclick="sendGroupMessage()">&#10148;</button>
                 </div>
             </div>
@@ -1169,6 +1663,163 @@
             setTimeout(() => toast.classList.remove('show'), 3000);
         }
 
+        // ========================================
+        // Disappearing Messages (TTL)
+        // ========================================
+        const TTL_OPTIONS = [
+            { label: 'Off', value: null },
+            { label: '30s', value: 30 },
+            { label: '5m', value: 300 },
+            { label: '1h', value: 3600 },
+            { label: '24h', value: 86400 },
+            { label: '7d', value: 604800 },
+        ];
+
+        function getTtl(type, id) {
+            return JSON.parse(localStorage.getItem(`ttl_${type}_${id}`) || 'null');
+        }
+        function setTtl(type, id, value) {
+            if (value === null) localStorage.removeItem(`ttl_${type}_${id}`);
+            else localStorage.setItem(`ttl_${type}_${id}`, JSON.stringify(value));
+            updateTtlButton(type);
+        }
+
+        function toggleTtlDropdown(type) {
+            const dropdown = document.getElementById(`ttl-dropdown-${type}`);
+            if (dropdown.style.display === 'none') {
+                const id = type === 'p2p'
+                    ? (currentContact ? currentContact.address : '')
+                    : (currentGroup ? currentGroup.id : '');
+                const currentTtl = getTtl(type, id);
+                dropdown.innerHTML = TTL_OPTIONS.map(opt =>
+                    `<button class="ttl-option ${opt.value === currentTtl ? 'selected' : ''}" onclick="selectTtl('${type}', ${JSON.stringify(opt.value)})">${opt.label}</button>`
+                ).join('');
+                dropdown.style.display = 'block';
+                // Close on outside click
+                setTimeout(() => {
+                    const close = (e) => {
+                        if (!dropdown.contains(e.target) && !e.target.classList.contains('ttl-btn')) {
+                            dropdown.style.display = 'none';
+                            document.removeEventListener('click', close);
+                        }
+                    };
+                    document.addEventListener('click', close);
+                }, 0);
+            } else {
+                dropdown.style.display = 'none';
+            }
+        }
+
+        function selectTtl(type, value) {
+            const id = type === 'p2p'
+                ? (currentContact ? currentContact.address : '')
+                : (currentGroup ? currentGroup.id : '');
+            setTtl(type, id, value);
+            document.getElementById(`ttl-dropdown-${type}`).style.display = 'none';
+        }
+
+        function updateTtlButton(type) {
+            const btnId = type === 'p2p' ? 'ttl-btn' : 'group-ttl-btn';
+            const btn = document.getElementById(btnId);
+            if (!btn) return;
+            const id = type === 'p2p'
+                ? (currentContact ? currentContact.address : '')
+                : (currentGroup ? currentGroup.id : '');
+            const ttl = getTtl(type, id);
+            // Remove old badge
+            const old = btn.querySelector('.ttl-badge');
+            if (old) old.remove();
+            if (ttl) {
+                btn.classList.add('active');
+                const label = TTL_OPTIONS.find(o => o.value === ttl);
+                const badge = document.createElement('span');
+                badge.className = 'ttl-badge';
+                badge.textContent = label ? label.label : ttl + 's';
+                btn.appendChild(badge);
+            } else {
+                btn.classList.remove('active');
+            }
+        }
+
+        function formatTtlRemaining(timestamp, ttl) {
+            const expiresAt = timestamp + ttl;
+            const now = Math.floor(Date.now() / 1000);
+            const remaining = expiresAt - now;
+            if (remaining <= 0) return 'expiring';
+            if (remaining < 60) return remaining + 's';
+            if (remaining < 3600) return Math.floor(remaining / 60) + 'm';
+            if (remaining < 86400) return Math.floor(remaining / 3600) + 'h';
+            return Math.floor(remaining / 86400) + 'd';
+        }
+
+        // Notification sound using Web Audio API
+        let _audioCtx = null;
+        function playNotificationSound() {
+            if (localStorage.getItem('torchat_notif_sound') === 'false') return;
+            try {
+                if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const ctx = _audioCtx;
+                const now = ctx.currentTime;
+                const duration = 0.15;
+
+                [520, 660].forEach(freq => {
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc.type = 'sine';
+                    osc.frequency.value = freq;
+                    gain.gain.setValueAtTime(0.15, now);
+                    gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+                    osc.connect(gain);
+                    gain.connect(ctx.destination);
+                    osc.start(now);
+                    osc.stop(now + duration);
+                });
+            } catch (e) { /* Audio not supported */ }
+        }
+
+        // Desktop notifications
+        function sendDesktopNotification(title, body) {
+            if (localStorage.getItem('torchat_desktop_notif') === 'false') return;
+            if (!('Notification' in window) || Notification.permission !== 'granted') return;
+            if (!document.hidden) return;
+            try {
+                const notif = new Notification(title, { body: body, tag: 'torchat-' + Date.now() });
+                notif.onclick = () => { window.focus(); notif.close(); };
+            } catch (e) { /* Notification failed */ }
+        }
+
+        function requestNotificationPermission() {
+            if (!('Notification' in window)) return;
+            Notification.requestPermission().then(perm => {
+                updateNotifPermissionUI();
+                if (perm === 'granted') {
+                    document.getElementById('toggle-desktop-notif').checked = true;
+                    localStorage.setItem('torchat_desktop_notif', 'true');
+                }
+            });
+        }
+
+        function updateNotifPermissionUI() {
+            const badge = document.getElementById('notif-permission-badge');
+            const sublabel = document.getElementById('notif-permission-status');
+            if (!('Notification' in window)) {
+                sublabel.textContent = 'Not supported in this browser';
+                badge.innerHTML = '';
+                return;
+            }
+            const perm = Notification.permission;
+            if (perm === 'granted') {
+                sublabel.textContent = 'Enabled';
+                badge.innerHTML = '<span class="notif-status granted">Allowed</span>';
+            } else if (perm === 'denied') {
+                sublabel.textContent = 'Blocked by browser';
+                badge.innerHTML = '<span class="notif-status denied">Blocked</span>';
+            } else {
+                sublabel.innerHTML = '<button class="notif-permission-btn" onclick="requestNotificationPermission()">Allow</button>';
+                badge.innerHTML = '';
+            }
+        }
+
         async function api(endpoint, method = 'GET', body = null) {
             const options = { method, headers: { 'Content-Type': 'application/json' } };
             if (body) options.body = JSON.stringify(body);
@@ -1186,6 +1837,240 @@
         let myOnionAddress = '';
         let messagePollingInterval = null;
         let lastMessageCount = 0;
+
+        // ========================================
+        // WebSocket Real-Time Connection
+        // ========================================
+        let ws = null;
+        let wsReconnectTimer = null;
+        let wsReconnectDelay = 1000;
+        const WS_MAX_RECONNECT_DELAY = 30000;
+        let wsConnected = false;
+
+        function connectWebSocket() {
+            const sessionToken = getSessionToken();
+            if (!sessionToken) {
+                console.log('[WS] No session token, deferring WebSocket connection');
+                return;
+            }
+
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${location.host}/api/ws?token=${encodeURIComponent(sessionToken)}`;
+
+            console.log('[WS] Connecting...');
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = function() {
+                console.log('[WS] Connected');
+                wsConnected = true;
+                wsReconnectDelay = 1000;
+                stopAllPolling();
+            };
+
+            ws.onmessage = function(event) {
+                try {
+                    const msg = JSON.parse(event.data);
+                    handleWsEvent(msg);
+                } catch (e) {
+                    console.warn('[WS] Failed to parse message:', e);
+                }
+            };
+
+            ws.onclose = function(event) {
+                console.log('[WS] Disconnected (code:', event.code, ')');
+                wsConnected = false;
+                ws = null;
+                restorePolling();
+                scheduleReconnect();
+            };
+
+            ws.onerror = function(error) {
+                console.warn('[WS] Error:', error);
+            };
+        }
+
+        function scheduleReconnect() {
+            if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
+            console.log(`[WS] Reconnecting in ${wsReconnectDelay}ms...`);
+            wsReconnectTimer = setTimeout(() => {
+                connectWebSocket();
+            }, wsReconnectDelay);
+            wsReconnectDelay = Math.min(wsReconnectDelay * 2, WS_MAX_RECONNECT_DELAY);
+        }
+
+        function disconnectWebSocket() {
+            if (wsReconnectTimer) {
+                clearTimeout(wsReconnectTimer);
+                wsReconnectTimer = null;
+            }
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+            wsConnected = false;
+        }
+
+        function getSessionToken() {
+            const match = document.cookie.match(/torchat_session=([^;]+)/);
+            return match ? match[1] : null;
+        }
+
+        function stopAllPolling() {
+            if (messagePollingInterval) {
+                clearInterval(messagePollingInterval);
+                messagePollingInterval = null;
+            }
+            if (typeof groupMessagePollingInterval !== 'undefined' && groupMessagePollingInterval) {
+                clearInterval(groupMessagePollingInterval);
+                groupMessagePollingInterval = null;
+            }
+            if (typeof invitePollingInterval !== 'undefined' && invitePollingInterval) {
+                clearInterval(invitePollingInterval);
+                invitePollingInterval = null;
+            }
+        }
+
+        function restorePolling() {
+            if (currentContact) {
+                startMessagePolling();
+            }
+            if (typeof currentGroup !== 'undefined' && currentGroup) {
+                if (typeof startGroupMessagePolling === 'function') startGroupMessagePolling();
+            }
+            if (typeof startInvitePolling === 'function') startInvitePolling();
+        }
+
+        function handleWsEvent(msg) {
+            const { type, data } = msg;
+
+            switch (type) {
+                case 'connected':
+                    console.log('[WS] Authenticated, user_id:', data.user_id);
+                    break;
+
+                case 'message_received':
+                    if (currentContact && currentContact.address === data.from) {
+                        loadMessages(currentContact.address, true);
+                    } else {
+                        showToast('New message from ' + (data.from.substring(0, 8) + '...'));
+                        playNotificationSound();
+                        sendDesktopNotification('New Message', 'From: ' + data.from.substring(0, 16) + '...');
+                        loadContacts();
+                    }
+                    break;
+
+                case 'message_delivered':
+                    if (currentContact) {
+                        loadMessages(currentContact.address, true);
+                    }
+                    break;
+
+                case 'message_failed':
+                    showToast('Message delivery failed: ' + (data.error || 'Unknown'));
+                    break;
+
+                case 'group_message_received':
+                    if (typeof currentGroup !== 'undefined' && currentGroup && currentGroup.id === data.group_id) {
+                        if (typeof loadGroupMessages === 'function') {
+                            loadGroupMessages(currentGroup.id, true);
+                        }
+                    } else {
+                        showToast('New group message');
+                        playNotificationSound();
+                        sendDesktopNotification('Group Message', data.content ? data.content.substring(0, 50) : '');
+                    }
+                    break;
+
+                case 'group_joined':
+                    showToast('Joined group: ' + data.name);
+                    if (typeof loadGroups === 'function') loadGroups();
+                    break;
+
+                case 'group_member_joined':
+                    if (typeof currentGroup !== 'undefined' && currentGroup && currentGroup.id === data.group_id) {
+                        if (typeof loadGroupMessages === 'function') loadGroupMessages(currentGroup.id, true);
+                    }
+                    break;
+
+                case 'group_member_left':
+                    if (typeof currentGroup !== 'undefined' && currentGroup && currentGroup.id === data.group_id) {
+                        if (typeof loadGroupMessages === 'function') loadGroupMessages(currentGroup.id, true);
+                    }
+                    break;
+
+                case 'group_invite_received':
+                    showToast('New group invite: ' + (data.group_name || 'Unknown group'));
+                    playNotificationSound();
+                    sendDesktopNotification('Group Invite', data.group_name || 'You were invited to a group');
+                    if (typeof loadPendingInvites === 'function') loadPendingInvites();
+                    break;
+
+                case 'file_received':
+                    if (currentContact && currentContact.address === data.from) {
+                        loadMessages(currentContact.address, true);
+                    }
+                    showToast('File received: ' + data.filename);
+                    playNotificationSound();
+                    sendDesktopNotification('File Received', data.filename);
+                    break;
+
+                case 'group_file_shared':
+                    if (typeof currentGroup !== 'undefined' && currentGroup && currentGroup.id === data.group_id) {
+                        if (typeof loadGroupMessages === 'function') loadGroupMessages(currentGroup.id, true);
+                    }
+                    break;
+
+                case 'group_file_downloaded':
+                    showToast('Group file downloaded');
+                    if (typeof currentGroup !== 'undefined' && currentGroup && currentGroup.id === data.group_id) {
+                        if (typeof loadGroupMessages === 'function') loadGroupMessages(currentGroup.id, true);
+                    }
+                    break;
+
+                case 'group_file_download_failed':
+                    showToast('File download failed: ' + (data.error || 'Unknown'));
+                    break;
+
+                case 'peer_connected':
+                    console.log('[WS] Peer connected:', data.address);
+                    break;
+
+                case 'peer_disconnected':
+                    console.log('[WS] Peer disconnected:', data.address);
+                    break;
+
+                case 'daemon_started':
+                    console.log('[WS] Daemon started at:', data.onion_address);
+                    break;
+
+                case 'daemon_stopped':
+                    showToast('P2P daemon stopped');
+                    break;
+
+                case 'group_created':
+                    showToast('Group created: ' + data.name);
+                    if (typeof loadGroups === 'function') loadGroups();
+                    break;
+
+                case 'lagged':
+                    console.warn('[WS] Missed', data.missed, 'events, refreshing...');
+                    if (currentContact) loadMessages(currentContact.address, true);
+                    if (typeof currentGroup !== 'undefined' && currentGroup) {
+                        if (typeof loadGroupMessages === 'function') loadGroupMessages(currentGroup.id, true);
+                    }
+                    loadContacts();
+                    if (typeof loadGroups === 'function') loadGroups();
+                    if (typeof loadPendingInvites === 'function') loadPendingInvites();
+                    break;
+
+                case 'error':
+                    console.warn('[WS] Server error:', data.message);
+                    break;
+
+                default:
+                    console.log('[WS] Unknown event type:', type, data);
+            }
+        }
 
         function switchTab(tabName) {
             document.getElementById('chat-panel').classList.remove('active');
@@ -1205,6 +2090,7 @@
                 setIdentityDisplay(result.data);
                 loadContacts();
                 if (typeof loadGroups !== 'undefined') loadGroups();
+                connectWebSocket();
                 // Update daemon status - it auto-started on login
                 if (statusEl) {
                     statusEl.className = 'status-message info';
@@ -1220,6 +2106,7 @@
                     showToast('Your unique address has been generated! P2P daemon is starting...');
                     loadContacts();
                     if (typeof loadGroups !== 'undefined') loadGroups();
+                    connectWebSocket();
                     // Update daemon status - it auto-started on registration
                     if (statusEl) {
                         statusEl.className = 'status-message info';
@@ -1326,6 +2213,7 @@
             document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
             document.getElementById('chat-panel').classList.add('active');
             await loadMessages(address);
+            updateTtlButton('p2p');
             startMessagePolling();
         }
 
@@ -1395,9 +2283,12 @@
                                 </div>
                             `;
                         } else {
+                            const ttlInfo = item.disappear_after
+                                ? `<span class="ttl-indicator" title="Disappears in ${formatTtlRemaining(item.timestamp, item.disappear_after)}">&#9201; ${formatTtlRemaining(item.timestamp, item.disappear_after)}</span>`
+                                : '';
                             return `
                                 <div class="message ${item.is_outgoing ? 'sent' : 'received'}">
-                                    <div class="message-bubble">${escapeHtml(item.content)}<div class="message-time">${formatTime(item.timestamp)}</div></div>
+                                    <div class="message-bubble">${escapeHtml(item.content)}<div class="message-time">${formatTime(item.timestamp)}${ttlInfo}</div></div>
                                 </div>
                             `;
                         }
@@ -1411,8 +2302,12 @@
                         if (!newItem.is_outgoing) {
                             if (newItem.is_file) {
                                 showToast(`File received: ${newItem.filename}`);
+                                playNotificationSound();
+                                sendDesktopNotification('File Received', newItem.filename);
                             } else {
                                 showToast('New message received!');
+                                playNotificationSound();
+                                sendDesktopNotification('New Message', currentContact?.name || 'New message received');
                             }
                         }
                     }
@@ -1424,6 +2319,7 @@
         }
 
         function startMessagePolling() {
+            if (wsConnected) return; // WebSocket handles real-time updates
             if (messagePollingInterval) clearInterval(messagePollingInterval);
             messagePollingInterval = setInterval(() => {
                 if (currentContact) {
@@ -1458,7 +2354,8 @@
             input.value = '';
             input.style.height = 'auto';
 
-            const result = await api('/api/messages', 'POST', { to: currentContact.address, content });
+            const ttl = getTtl('p2p', currentContact.address);
+            const result = await api('/api/messages', 'POST', { to: currentContact.address, content, disappear_after: ttl });
             msgEl.querySelector('.message-time').textContent = result.success ? 'Sent' : 'Failed';
             if (!result.success) showToast('Failed to send: ' + (result.error || 'Unknown error'));
         }
@@ -1791,6 +2688,107 @@
             }
         }
 
+        // Settings toggle handlers
+        function toggleDarkMode() {
+            const enabled = document.getElementById('toggle-dark-mode').checked;
+            document.body.classList.toggle('dark-mode', enabled);
+            localStorage.setItem('torchat_dark_mode', enabled ? 'true' : 'false');
+            document.querySelector('meta[name="theme-color"]').setAttribute('content', enabled ? '#1a1a2e' : '#667eea');
+        }
+
+        function toggleNotifSound() {
+            const enabled = document.getElementById('toggle-notif-sound').checked;
+            localStorage.setItem('torchat_notif_sound', enabled ? 'true' : 'false');
+            if (enabled) playNotificationSound();
+        }
+
+        function toggleDesktopNotif() {
+            const toggle = document.getElementById('toggle-desktop-notif');
+            if (toggle.checked && 'Notification' in window && Notification.permission === 'default') {
+                requestNotificationPermission();
+            }
+            localStorage.setItem('torchat_desktop_notif', toggle.checked ? 'true' : 'false');
+        }
+
+        // Message search (P2P chat)
+        let _searchDebounce = null;
+        let _isSearching = false;
+
+        function highlightText(text, query) {
+            if (!query) return escapeHtml(text);
+            const escaped = escapeHtml(text);
+            const queryEscaped = escapeHtml(query).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const regex = new RegExp('(' + queryEscaped + ')', 'gi');
+            return escaped.replace(regex, '<mark class="search-highlight">$1</mark>');
+        }
+
+        function toggleMessageSearch() {
+            const bar = document.getElementById('chat-search-bar');
+            if (bar.style.display === 'none') {
+                bar.style.display = 'flex';
+                document.getElementById('chat-search-input').focus();
+            } else {
+                closeMessageSearch();
+            }
+        }
+
+        function closeMessageSearch() {
+            document.getElementById('chat-search-bar').style.display = 'none';
+            document.getElementById('chat-search-input').value = '';
+            _isSearching = false;
+            if (currentContact) loadMessages(currentContact.address);
+        }
+
+        function debouncedSearchMessages() {
+            clearTimeout(_searchDebounce);
+            _searchDebounce = setTimeout(searchMessages, 300);
+        }
+
+        async function searchMessages() {
+            const query = document.getElementById('chat-search-input').value.trim();
+            if (!query || !currentContact) {
+                if (!query && _isSearching) {
+                    _isSearching = false;
+                    loadMessages(currentContact.address);
+                }
+                return;
+            }
+            _isSearching = true;
+            const container = document.getElementById('messages-container');
+            const result = await api(`/api/messages/${encodeURIComponent(currentContact.address)}/search?q=${encodeURIComponent(query)}`);
+            const messages = (result.success && result.data) ? result.data : [];
+
+            if (messages.length > 0) {
+                container.innerHTML =
+                    `<div class="search-result-count">${messages.length} result${messages.length !== 1 ? 's' : ''} found</div>` +
+                    messages.map(item => `
+                        <div class="message ${item.is_outgoing ? 'sent' : 'received'}">
+                            <div class="message-bubble">${highlightText(item.content, query)}<div class="message-time">${formatTime(item.timestamp)}</div></div>
+                        </div>
+                    `).join('');
+            } else {
+                container.innerHTML = '<div class="empty-state"><h3>No results</h3><p>No messages match your search</p></div>';
+            }
+        }
+
+        // Load saved preferences on startup
+        function loadPreferences() {
+            // Dark mode
+            if (localStorage.getItem('torchat_dark_mode') === 'true') {
+                document.body.classList.add('dark-mode');
+                document.getElementById('toggle-dark-mode').checked = true;
+                document.querySelector('meta[name="theme-color"]').setAttribute('content', '#1a1a2e');
+            }
+            // Notification sounds (default: on)
+            const soundPref = localStorage.getItem('torchat_notif_sound');
+            document.getElementById('toggle-notif-sound').checked = soundPref !== 'false';
+            // Desktop notifications
+            const desktopPref = localStorage.getItem('torchat_desktop_notif');
+            document.getElementById('toggle-desktop-notif').checked = desktopPref === 'true';
+            updateNotifPermissionUI();
+        }
+
+        loadPreferences();
         loadIdentity();
     </script>
 </body>

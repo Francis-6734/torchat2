@@ -138,6 +138,7 @@ CREATE TABLE IF NOT EXISTS group_messages (
     received_at INTEGER NOT NULL,
     hop_count INTEGER NOT NULL,
     is_delivered INTEGER NOT NULL DEFAULT 1,
+    disappear_after INTEGER,
     UNIQUE(group_db_id, msg_id)
 );
 
@@ -220,6 +221,19 @@ CREATE TABLE IF NOT EXISTS group_files (
 
 CREATE INDEX IF NOT EXISTS idx_group_files_group ON group_files(group_db_id);
 CREATE INDEX IF NOT EXISTS idx_group_files_file_id ON group_files(file_id);
+
+-- Group ban list
+CREATE TABLE IF NOT EXISTS group_bans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_db_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    member_id BLOB NOT NULL,
+    banned_by BLOB,
+    reason TEXT,
+    banned_at INTEGER NOT NULL,
+    UNIQUE(group_db_id, member_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_group_bans_group ON group_bans(group_db_id);
 
 -- Schema version
 INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', ?);

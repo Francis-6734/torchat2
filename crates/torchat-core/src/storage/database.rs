@@ -84,6 +84,11 @@ impl Database {
         self.conn
             .execute_batch(&CREATE_SCHEMA.replace("?", &SCHEMA_VERSION.to_string()))
             .map_err(|e| Error::Storage(format!("failed to create schema: {}", e)))?;
+
+        // Migrations: add disappear_after columns for existing databases
+        let _ = self.conn.execute("ALTER TABLE group_messages ADD COLUMN disappear_after INTEGER", []);
+        let _ = self.conn.execute("ALTER TABLE simple_messages ADD COLUMN disappear_after INTEGER", []);
+
         Ok(())
     }
 
@@ -279,6 +284,28 @@ impl Database {
             .map_err(|e| Error::Storage(e.to_string()))?;
 
         Ok(rows > 0)
+    }
+
+    /// Delete expired disappearing messages from both simple_messages and group_messages.
+    /// Returns (p2p_deleted, group_deleted) counts.
+    pub fn cleanup_expired_messages(&self) -> Result<(usize, usize)> {
+        let now = chrono::Utc::now().timestamp();
+
+        let p2p = self.conn
+            .execute(
+                "DELETE FROM simple_messages WHERE disappear_after IS NOT NULL AND timestamp + disappear_after < ?",
+                params![now],
+            )
+            .unwrap_or(0);
+
+        let group = self.conn
+            .execute(
+                "DELETE FROM group_messages WHERE disappear_after IS NOT NULL AND timestamp + disappear_after < ?",
+                params![now],
+            )
+            .unwrap_or(0);
+
+        Ok((p2p, group))
     }
 
     /// Update message status.
@@ -505,6 +532,165 @@ impl Database {
         Ok(())
     }
 
+    /// Delete a member from a group.
+    pub fn delete_group_member(&self, group_id: &[u8; 32], member_id: &[u8; 16]) -> Result<()> {
+        self.conn
+            .execute(
+                r#"
+                DELETE FROM group_members
+                WHERE group_id = (SELECT id FROM groups WHERE group_id = ?)
+                AND member_id = ?
+                "#,
+                params![group_id.as_slice(), member_id.as_slice()],
+            )
+            .map_err(|e| Error::Storage(format!("failed to delete group member: {}", e)))?;
+        Ok(())
+    }
+
+    /// Ban a member from a group (removes and prevents rejoin).
+    pub fn ban_group_member(
+        &self,
+        group_id: &[u8; 32],
+        member_id: &[u8; 16],
+        banned_by: Option<&[u8; 16]>,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+
+        // Ensure group_bans table exists
+        self.conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS group_bans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_db_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+                member_id BLOB NOT NULL,
+                banned_by BLOB,
+                reason TEXT,
+                banned_at INTEGER NOT NULL,
+                UNIQUE(group_db_id, member_id)
+            );
+            "#
+        ).map_err(|e| Error::Storage(e.to_string()))?;
+
+        // Add to ban list
+        self.conn
+            .execute(
+                r#"
+                INSERT OR REPLACE INTO group_bans (group_db_id, member_id, banned_by, reason, banned_at)
+                VALUES ((SELECT id FROM groups WHERE group_id = ?), ?, ?, ?, ?)
+                "#,
+                params![
+                    group_id.as_slice(),
+                    member_id.as_slice(),
+                    banned_by.map(|b| b.as_slice()),
+                    reason,
+                    now,
+                ],
+            )
+            .map_err(|e| Error::Storage(format!("failed to ban member: {}", e)))?;
+
+        // Remove from members
+        self.delete_group_member(group_id, member_id)?;
+
+        Ok(())
+    }
+
+    /// Remove a ban for a group member.
+    pub fn unban_group_member(&self, group_id: &[u8; 32], member_id: &[u8; 16]) -> Result<()> {
+        self.conn
+            .execute(
+                r#"
+                DELETE FROM group_bans
+                WHERE group_db_id = (SELECT id FROM groups WHERE group_id = ?)
+                AND member_id = ?
+                "#,
+                params![group_id.as_slice(), member_id.as_slice()],
+            )
+            .map_err(|e| Error::Storage(format!("failed to unban member: {}", e)))?;
+        Ok(())
+    }
+
+    /// Check if a member is banned from a group.
+    pub fn is_member_banned(&self, group_id: &[u8; 32], member_id: &[u8; 16]) -> Result<bool> {
+        // Ensure table exists
+        self.conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS group_bans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_db_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+                member_id BLOB NOT NULL,
+                banned_by BLOB,
+                reason TEXT,
+                banned_at INTEGER NOT NULL,
+                UNIQUE(group_db_id, member_id)
+            );
+            "#
+        ).map_err(|e| Error::Storage(e.to_string()))?;
+
+        let count: i64 = self.conn
+            .query_row(
+                r#"
+                SELECT COUNT(*) FROM group_bans
+                WHERE group_db_id = (SELECT id FROM groups WHERE group_id = ?)
+                AND member_id = ?
+                "#,
+                params![group_id.as_slice(), member_id.as_slice()],
+                |row| row.get(0),
+            )
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(count > 0)
+    }
+
+    /// List all banned members for a group.
+    pub fn list_group_bans(&self, group_id: &[u8; 32]) -> Result<Vec<BanRecord>> {
+        // Ensure table exists
+        self.conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS group_bans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_db_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+                member_id BLOB NOT NULL,
+                banned_by BLOB,
+                reason TEXT,
+                banned_at INTEGER NOT NULL,
+                UNIQUE(group_db_id, member_id)
+            );
+            "#
+        ).map_err(|e| Error::Storage(e.to_string()))?;
+
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT member_id, reason, banned_at
+            FROM group_bans
+            WHERE group_db_id = (SELECT id FROM groups WHERE group_id = ?)
+            ORDER BY banned_at DESC
+            "#,
+        ).map_err(|e| Error::Storage(e.to_string()))?;
+
+        let rows = stmt.query_map(params![group_id.as_slice()], |row| {
+            let member_id_bytes: Vec<u8> = row.get(0)?;
+            let reason: Option<String> = row.get(1)?;
+            let banned_at: i64 = row.get(2)?;
+
+            let mut member_id = [0u8; 16];
+            if member_id_bytes.len() == 16 {
+                member_id.copy_from_slice(&member_id_bytes);
+            }
+
+            Ok(BanRecord {
+                member_id,
+                reason,
+                banned_at,
+            })
+        }).map_err(|e| Error::Storage(e.to_string()))?;
+
+        let mut bans = Vec::new();
+        for row in rows {
+            bans.push(row.map_err(|e| Error::Storage(e.to_string()))?);
+        }
+        Ok(bans)
+    }
+
     /// Store a preliminary group record when accepting an invite (before full join completes).
     pub fn store_preliminary_group(
         &self,
@@ -632,10 +818,10 @@ impl Database {
             .execute(
                 r#"
                 INSERT OR REPLACE INTO group_messages
-                (group_db_id, msg_id, sender_anon_id, epoch_number, content, timestamp, received_at, hop_count, is_delivered)
+                (group_db_id, msg_id, sender_anon_id, epoch_number, content, timestamp, received_at, hop_count, is_delivered, disappear_after)
                 VALUES (
                     (SELECT id FROM groups WHERE group_id = ?),
-                    ?, ?, 0, ?, ?, ?, 0, 1
+                    ?, ?, 0, ?, ?, ?, 0, 1, ?
                 )
                 "#,
                 params![
@@ -645,6 +831,7 @@ impl Database {
                     message.content.as_bytes(),
                     message.timestamp,
                     now,
+                    message.disappear_after,
                 ],
             )
             .map_err(|e| Error::Storage(format!("failed to store group message: {}", e)))?;
@@ -654,13 +841,15 @@ impl Database {
 
     /// Load recent messages for a group.
     pub fn load_group_messages(&self, group_id: &[u8; 32], limit: u32) -> Result<Vec<GroupMessage>> {
+        let now = chrono::Utc::now().timestamp();
         let mut stmt = self
             .conn
             .prepare(
                 r#"
-                SELECT msg_id, sender_anon_id, content, timestamp
+                SELECT msg_id, sender_anon_id, content, timestamp, disappear_after
                 FROM group_messages
                 WHERE group_db_id = (SELECT id FROM groups WHERE group_id = ?)
+                  AND (disappear_after IS NULL OR timestamp + disappear_after > ?)
                 ORDER BY timestamp DESC
                 LIMIT ?
                 "#
@@ -668,7 +857,7 @@ impl Database {
             .map_err(|e| Error::Storage(e.to_string()))?;
 
         let rows = stmt
-            .query_map(params![group_id.as_slice(), limit], |row| {
+            .query_map(params![group_id.as_slice(), now, limit], |row| {
                 let msg_id_bytes: Vec<u8> = row.get(0)?;
                 let sender_id_bytes: Vec<u8> = row.get(1)?;
                 // Handle both BLOB (new) and TEXT (old) storage for content
@@ -676,13 +865,14 @@ impl Database {
                     row.get::<_, String>(2).map(|s| s.into_bytes())
                 })?;
                 let timestamp: i64 = row.get(3)?;
-                Ok((msg_id_bytes, sender_id_bytes, content_data, timestamp))
+                let disappear_after: Option<i64> = row.get(4)?;
+                Ok((msg_id_bytes, sender_id_bytes, content_data, timestamp, disappear_after))
             })
             .map_err(|e| Error::Storage(e.to_string()))?;
 
         let mut messages = Vec::new();
         for row in rows {
-            let (msg_id_bytes, sender_id_bytes, content_data, timestamp) =
+            let (msg_id_bytes, sender_id_bytes, content_data, timestamp, disappear_after) =
                 row.map_err(|e| Error::Storage(e.to_string()))?;
 
             let mut msg_id = [0u8; 32];
@@ -703,6 +893,7 @@ impl Database {
                 content,
                 timestamp,
                 outgoing: false, // Will be determined by comparing sender_id with our member_id
+                disappear_after,
             });
         }
 
@@ -924,12 +1115,16 @@ impl Database {
                     content TEXT NOT NULL,
                     is_outgoing INTEGER NOT NULL,
                     timestamp INTEGER NOT NULL,
+                    disappear_after INTEGER,
                     FOREIGN KEY (contact_id) REFERENCES contacts(id)
                 )
                 "#,
                 [],
             )
             .map_err(|e| Error::Storage(format!("failed to create table: {}", e)))?;
+
+        // Migration: add column for existing tables
+        let _ = self.conn.execute("ALTER TABLE simple_messages ADD COLUMN disappear_after INTEGER", []);
 
         self.conn
             .execute(
@@ -956,6 +1151,7 @@ impl Database {
                     content TEXT NOT NULL,
                     is_outgoing INTEGER NOT NULL,
                     timestamp INTEGER NOT NULL,
+                    disappear_after INTEGER,
                     FOREIGN KEY (contact_id) REFERENCES contacts(id)
                 )
                 "#,
@@ -963,13 +1159,17 @@ impl Database {
             )
             .map_err(|e| Error::Storage(e.to_string()))?;
 
+        let _ = self.conn.execute("ALTER TABLE simple_messages ADD COLUMN disappear_after INTEGER", []);
+
+        let now = chrono::Utc::now().timestamp();
         let mut stmt = self
             .conn
             .prepare(
                 r#"
-                SELECT id, content, is_outgoing, timestamp
+                SELECT id, content, is_outgoing, timestamp, disappear_after
                 FROM simple_messages
                 WHERE contact_id = ?
+                  AND (disappear_after IS NULL OR timestamp + disappear_after > ?)
                 ORDER BY timestamp DESC
                 LIMIT ?
                 "#,
@@ -977,16 +1177,18 @@ impl Database {
             .map_err(|e| Error::Storage(e.to_string()))?;
 
         let rows = stmt
-            .query_map(params![contact_id, limit], |row| {
+            .query_map(params![contact_id, now, limit], |row| {
                 let id: i64 = row.get(0)?;
                 let content: String = row.get(1)?;
                 let is_outgoing: i32 = row.get(2)?;
                 let timestamp: i64 = row.get(3)?;
+                let disappear_after: Option<i64> = row.get(4)?;
                 Ok(SimpleMessage {
                     id,
                     content,
                     is_outgoing: is_outgoing != 0,
                     timestamp,
+                    disappear_after,
                 })
             })
             .map_err(|e| Error::Storage(e.to_string()))?;
@@ -1183,7 +1385,7 @@ impl Database {
     }
 
     /// Store a simple message by peer address (creates contact if needed).
-    pub fn store_simple_message_by_address(&self, user_id: i64, peer_address: &str, content: &str, is_outgoing: bool) -> Result<i64> {
+    pub fn store_simple_message_by_address(&self, user_id: i64, peer_address: &str, content: &str, is_outgoing: bool, disappear_after: Option<i64>) -> Result<i64> {
         // Ensure simple_messages table exists
         self.conn
             .execute(
@@ -1194,22 +1396,26 @@ impl Database {
                     peer_address TEXT NOT NULL,
                     content TEXT NOT NULL,
                     is_outgoing INTEGER NOT NULL,
-                    timestamp INTEGER NOT NULL
+                    timestamp INTEGER NOT NULL,
+                    disappear_after INTEGER
                 )
                 "#,
                 [],
             )
             .map_err(|e| Error::Storage(e.to_string()))?;
 
+        // Migration: add column for existing tables
+        let _ = self.conn.execute("ALTER TABLE simple_messages ADD COLUMN disappear_after INTEGER", []);
+
         let timestamp = chrono::Utc::now().timestamp();
 
         self.conn
             .execute(
                 r#"
-                INSERT INTO simple_messages (user_id, peer_address, content, is_outgoing, timestamp)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO simple_messages (user_id, peer_address, content, is_outgoing, timestamp, disappear_after)
+                VALUES (?, ?, ?, ?, ?, ?)
                 "#,
-                params![user_id, peer_address, content, is_outgoing as i32, timestamp],
+                params![user_id, peer_address, content, is_outgoing as i32, timestamp, disappear_after],
             )
             .map_err(|e| Error::Storage(format!("failed to store message: {}", e)))?;
 
@@ -1228,20 +1434,25 @@ impl Database {
                     peer_address TEXT NOT NULL,
                     content TEXT NOT NULL,
                     is_outgoing INTEGER NOT NULL,
-                    timestamp INTEGER NOT NULL
+                    timestamp INTEGER NOT NULL,
+                    disappear_after INTEGER
                 )
                 "#,
                 [],
             )
             .map_err(|e| Error::Storage(e.to_string()))?;
 
+        let _ = self.conn.execute("ALTER TABLE simple_messages ADD COLUMN disappear_after INTEGER", []);
+
+        let now = chrono::Utc::now().timestamp();
         let mut stmt = self
             .conn
             .prepare(
                 r#"
-                SELECT id, content, is_outgoing, timestamp
+                SELECT id, content, is_outgoing, timestamp, disappear_after
                 FROM simple_messages
                 WHERE user_id = ? AND peer_address = ?
+                  AND (disappear_after IS NULL OR timestamp + disappear_after > ?)
                 ORDER BY timestamp DESC
                 LIMIT ?
                 "#,
@@ -1249,12 +1460,13 @@ impl Database {
             .map_err(|e| Error::Storage(e.to_string()))?;
 
         let rows = stmt
-            .query_map(params![user_id, peer_address, limit], |row| {
+            .query_map(params![user_id, peer_address, now, limit], |row| {
                 Ok(SimpleMessage {
                     id: row.get(0)?,
                     content: row.get(1)?,
                     is_outgoing: row.get::<_, i32>(2)? != 0,
                     timestamp: row.get(3)?,
+                    disappear_after: row.get(4)?,
                 })
             })
             .map_err(|e| Error::Storage(e.to_string()))?;
@@ -1265,6 +1477,198 @@ impl Database {
         }
 
         // Reverse to get chronological order
+        messages.reverse();
+        Ok(messages)
+    }
+
+    // ========================================================================
+    // Full-text search (FTS5)
+    // ========================================================================
+
+    /// Ensure FTS5 virtual tables and sync triggers exist.
+    pub fn ensure_fts_tables(&self) -> Result<()> {
+        self.conn.execute_batch(r#"
+            CREATE VIRTUAL TABLE IF NOT EXISTS simple_messages_fts USING fts5(
+                content,
+                content=simple_messages,
+                content_rowid=id
+            );
+
+            CREATE TRIGGER IF NOT EXISTS simple_messages_fts_insert
+            AFTER INSERT ON simple_messages BEGIN
+                INSERT INTO simple_messages_fts(rowid, content) VALUES (new.id, new.content);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS simple_messages_fts_delete
+            AFTER DELETE ON simple_messages BEGIN
+                INSERT INTO simple_messages_fts(simple_messages_fts, rowid, content)
+                VALUES('delete', old.id, old.content);
+            END;
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS group_messages_fts USING fts5(
+                content,
+                content=group_messages,
+                content_rowid=id
+            );
+
+            CREATE TRIGGER IF NOT EXISTS group_messages_fts_insert
+            AFTER INSERT ON group_messages BEGIN
+                INSERT INTO group_messages_fts(rowid, content)
+                VALUES (new.id, CAST(new.content AS TEXT));
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS group_messages_fts_delete
+            AFTER DELETE ON group_messages BEGIN
+                INSERT INTO group_messages_fts(group_messages_fts, rowid, content)
+                VALUES('delete', old.id, CAST(old.content AS TEXT));
+            END;
+        "#).map_err(|e| Error::Storage(format!("failed to create FTS tables: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Rebuild FTS indexes from existing data (for first-time indexing).
+    pub fn rebuild_fts_index(&self) -> Result<()> {
+        self.ensure_fts_tables()?;
+        self.conn.execute_batch(r#"
+            INSERT INTO simple_messages_fts(simple_messages_fts) VALUES('rebuild');
+            INSERT INTO group_messages_fts(group_messages_fts) VALUES('rebuild');
+        "#).map_err(|e| Error::Storage(format!("failed to rebuild FTS index: {}", e)))?;
+        Ok(())
+    }
+
+    /// Search P2P messages by content within a conversation.
+    pub fn search_messages_by_address(
+        &self,
+        user_id: i64,
+        peer_address: &str,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<SimpleMessage>> {
+        self.ensure_fts_tables()?;
+
+        // Rebuild index on first search if needed (idempotent)
+        let count: i64 = self.conn
+            .query_row("SELECT COUNT(*) FROM simple_messages_fts", [], |row| row.get(0))
+            .unwrap_or(0);
+        let total: i64 = self.conn
+            .query_row("SELECT COUNT(*) FROM simple_messages", [], |row| row.get(0))
+            .unwrap_or(0);
+        if count == 0 && total > 0 {
+            let _ = self.conn.execute(
+                "INSERT INTO simple_messages_fts(simple_messages_fts) VALUES('rebuild')",
+                [],
+            );
+        }
+
+        let fts_query = query.replace('"', "\"\"");
+        let fts_query = format!("\"{}\"", fts_query);
+
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT sm.id, sm.content, sm.is_outgoing, sm.timestamp
+            FROM simple_messages sm
+            JOIN simple_messages_fts fts ON sm.id = fts.rowid
+            WHERE sm.user_id = ? AND sm.peer_address = ?
+              AND simple_messages_fts MATCH ?
+            ORDER BY sm.timestamp DESC
+            LIMIT ?
+            "#,
+        ).map_err(|e| Error::Storage(e.to_string()))?;
+
+        let rows = stmt.query_map(params![user_id, peer_address, fts_query, limit], |row| {
+            Ok(SimpleMessage {
+                id: row.get(0)?,
+                content: row.get(1)?,
+                is_outgoing: row.get::<_, i32>(2)? != 0,
+                timestamp: row.get(3)?,
+                disappear_after: None,
+            })
+        }).map_err(|e| Error::Storage(e.to_string()))?;
+
+        let mut messages = Vec::new();
+        for row in rows {
+            messages.push(row.map_err(|e| Error::Storage(e.to_string()))?);
+        }
+        messages.reverse();
+        Ok(messages)
+    }
+
+    /// Search group messages by content.
+    pub fn search_group_messages(
+        &self,
+        group_id: &[u8; 32],
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<GroupMessage>> {
+        self.ensure_fts_tables()?;
+
+        // Rebuild index on first search if needed
+        let count: i64 = self.conn
+            .query_row("SELECT COUNT(*) FROM group_messages_fts", [], |row| row.get(0))
+            .unwrap_or(0);
+        let total: i64 = self.conn
+            .query_row("SELECT COUNT(*) FROM group_messages", [], |row| row.get(0))
+            .unwrap_or(0);
+        if count == 0 && total > 0 {
+            let _ = self.conn.execute(
+                "INSERT INTO group_messages_fts(group_messages_fts) VALUES('rebuild')",
+                [],
+            );
+        }
+
+        let fts_query = query.replace('"', "\"\"");
+        let fts_query = format!("\"{}\"", fts_query);
+
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT gm.msg_id, gm.sender_anon_id, gm.content, gm.timestamp
+            FROM group_messages gm
+            JOIN group_messages_fts fts ON gm.id = fts.rowid
+            WHERE gm.group_db_id = (SELECT id FROM groups WHERE group_id = ?)
+              AND group_messages_fts MATCH ?
+            ORDER BY gm.timestamp DESC
+            LIMIT ?
+            "#,
+        ).map_err(|e| Error::Storage(e.to_string()))?;
+
+        let rows = stmt.query_map(params![group_id.as_slice(), fts_query, limit], |row| {
+            let msg_id_bytes: Vec<u8> = row.get(0)?;
+            let sender_id_bytes: Vec<u8> = row.get(1)?;
+            let content_data: Vec<u8> = row.get::<_, Vec<u8>>(2).or_else(|_| {
+                row.get::<_, String>(2).map(|s| s.into_bytes())
+            })?;
+            let timestamp: i64 = row.get(3)?;
+            Ok((msg_id_bytes, sender_id_bytes, content_data, timestamp))
+        }).map_err(|e| Error::Storage(e.to_string()))?;
+
+        let mut messages = Vec::new();
+        for row in rows {
+            let (msg_id_bytes, sender_id_bytes, content_data, timestamp) =
+                row.map_err(|e| Error::Storage(e.to_string()))?;
+
+            let mut msg_id = [0u8; 32];
+            if msg_id_bytes.len() == 32 {
+                msg_id.copy_from_slice(&msg_id_bytes);
+            }
+
+            let mut sender_id = [0u8; 16];
+            if sender_id_bytes.len() == 16 {
+                sender_id.copy_from_slice(&sender_id_bytes);
+            }
+
+            let content = String::from_utf8_lossy(&content_data).to_string();
+
+            messages.push(GroupMessage {
+                id: msg_id,
+                sender_id,
+                content,
+                timestamp,
+                outgoing: false,
+                disappear_after: None,
+            });
+        }
+
         messages.reverse();
         Ok(messages)
     }
@@ -1690,6 +2094,19 @@ pub struct SimpleMessage {
     pub is_outgoing: bool,
     /// Timestamp (Unix epoch seconds).
     pub timestamp: i64,
+    /// Disappearing message TTL in seconds, if set.
+    pub disappear_after: Option<i64>,
+}
+
+/// Ban record from database.
+#[derive(Debug, Clone)]
+pub struct BanRecord {
+    /// Banned member's anonymous ID.
+    pub member_id: [u8; 16],
+    /// Reason for ban.
+    pub reason: Option<String>,
+    /// When the ban was created (Unix timestamp).
+    pub banned_at: i64,
 }
 
 /// Derive database encryption key from password using PBKDF2.

@@ -115,7 +115,7 @@ async fn security_headers_middleware(
     // Content Security Policy
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
-        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:"
             .parse()
             .unwrap(),
     );
@@ -235,6 +235,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/contacts/:contact_id/delete", post(api::delete_contact))
         // Messages - P2P messaging
         .route("/api/messages/:address", get(api::get_messages))
+        .route("/api/messages/:address/search", get(api::search_messages))
         .route("/api/messages", post(api::send_message))
         // Daemon control - each user runs their own P2P daemon
         .route("/api/daemon/start", post(api::start_daemon))
@@ -258,10 +259,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/groups/join", post(api::join_group))
         .route("/api/groups/:group_id/invite", post(api::send_group_invite))
         .route("/api/groups/:group_id/messages", get(api::get_group_messages).post(api::send_group_message))
+        .route("/api/groups/:group_id/messages/search", get(api::search_group_messages_endpoint))
         .route("/api/groups/:group_id/leave", post(api::leave_group))
         .route("/api/groups/:group_id/delete", post(api::delete_group))
         .route("/api/groups/:group_id/members", get(api::list_group_members))
         .route("/api/groups/:group_id/promote", post(api::promote_member))
+        .route("/api/groups/:group_id/remove", post(api::remove_member))
+        .route("/api/groups/:group_id/bans", get(api::list_group_bans))
+        .route("/api/groups/:group_id/unban", post(api::unban_member))
         // Group file sharing
         .route("/api/groups/:group_id/files", get(api::list_group_files))
         .route("/api/groups/:group_id/files/:file_id/download", post(api::download_group_file))
@@ -270,6 +275,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/invites", get(api::list_pending_invites))
         .route("/api/invites/:invite_id/accept", post(api::accept_pending_invite))
         .route("/api/invites/:invite_id/decline", post(api::decline_pending_invite))
+        // WebSocket for real-time push notifications
+        .route("/api/ws", get(api::ws_handler))
 
         // Apply default body limit for other routes
         .layer(RequestBodyLimitLayer::new(DEFAULT_BODY_LIMIT))

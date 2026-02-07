@@ -47,6 +47,8 @@ pub struct GroupMessage {
     pub timestamp: i64,
     /// Is this an outgoing message.
     pub outgoing: bool,
+    /// Disappearing message TTL in seconds, if set.
+    pub disappear_after: Option<i64>,
 }
 
 /// Group session.
@@ -376,6 +378,7 @@ impl GroupSession {
             content: content.to_string(),
             timestamp,
             outgoing: true,
+            disappear_after: None,
         });
 
         // Trim message cache
@@ -404,6 +407,7 @@ impl GroupSession {
                 content: msg.content.clone(),
                 timestamp: msg.timestamp,
                 outgoing: false,
+                disappear_after: None,
             });
 
             // Trim cache

@@ -449,6 +449,8 @@ pub enum DaemonCommand {
         group_id: [u8; 32],
         /// Message content.
         content: String,
+        /// Disappearing message TTL in seconds, if set.
+        disappear_after: Option<i64>,
     },
     /// Leave a group.
     LeaveGroup {
@@ -484,6 +486,22 @@ pub enum DaemonCommand {
         group_id: [u8; 32],
         /// Member ID to promote.
         member_id: [u8; 16],
+    },
+    /// Remove a member from a group.
+    RemoveMember {
+        /// Group ID.
+        group_id: [u8; 32],
+        /// Member ID to remove.
+        member_id: [u8; 16],
+    },
+    /// Ban a member from a group (remove + prevent rejoin).
+    BanMember {
+        /// Group ID.
+        group_id: [u8; 32],
+        /// Member ID to ban.
+        member_id: [u8; 16],
+        /// Optional ban reason.
+        reason: Option<String>,
     },
 }
 
@@ -1199,6 +1217,7 @@ impl MessagingDaemon {
                                                     &peer_address,
                                                     &content,
                                                     false, // is_outgoing = false for received messages
+                                                    None,  // no TTL for received messages
                                                 ) {
                                                     warn!(error = %e, "Failed to store received message");
                                                 } else {
@@ -1337,6 +1356,7 @@ impl MessagingDaemon {
                                 addr,
                                 &content,
                                 false, // is_outgoing = false for received messages
+                                None,  // no TTL for received messages
                             ) {
                                 warn!(error = %e, "Failed to store received message");
                             } else {
@@ -1918,15 +1938,17 @@ impl MessagingDaemon {
                         }
                     });
                 }
-                DaemonCommand::SendGroupMessage { group_id, content } => {
+                DaemonCommand::SendGroupMessage { group_id, content, disappear_after } => {
                     let send_result = {
                         let mut groups = group_sessions.write().await;
                         if let Some(session) = groups.get_mut(&group_id) {
                             match session.send_message(&content) {
                                 Ok(payload) => {
-                                    // Store message in database
+                                    // Store message in database with TTL
                                     if let Some(last_message) = session.messages.back() {
-                                        if let Err(e) = database.lock().await.store_group_message(&group_id, last_message) {
+                                        let mut msg_with_ttl = last_message.clone();
+                                        msg_with_ttl.disappear_after = disappear_after;
+                                        if let Err(e) = database.lock().await.store_group_message(&group_id, &msg_with_ttl) {
                                             warn!(error = %e, "Failed to persist group message to database");
                                         }
                                     }
@@ -2197,6 +2219,51 @@ impl MessagingDaemon {
                         }
                     } else {
                         warn!(group_id = ?group_id, "Group not found for admin promotion");
+                    }
+                }
+                DaemonCommand::RemoveMember { group_id, member_id } => {
+                    let mut groups = group_sessions.write().await;
+                    if let Some(session) = groups.get_mut(&group_id) {
+                        match session.remove_member(&member_id) {
+                            Ok(()) => {
+                                if let Err(e) = database.lock().await.delete_group_member(&group_id, &member_id) {
+                                    warn!(error = %e, "Failed to persist member removal to database");
+                                }
+                                info!(group_id = ?group_id, member_id = ?member_id, "Removed member from group");
+                            }
+                            Err(e) => {
+                                warn!(group_id = ?group_id, member_id = ?member_id, error = %e, "Failed to remove member");
+                                let _ = event_tx.send(DaemonEvent::Error {
+                                    message: format!("Failed to remove member: {}", e),
+                                });
+                            }
+                        }
+                    } else {
+                        warn!(group_id = ?group_id, "Group not found for member removal");
+                    }
+                }
+                DaemonCommand::BanMember { group_id, member_id, reason } => {
+                    let mut groups = group_sessions.write().await;
+                    if let Some(session) = groups.get_mut(&group_id) {
+                        let our_member_id = session.our_member_id;
+                        match session.remove_member(&member_id) {
+                            Ok(()) => {
+                                if let Err(e) = database.lock().await.ban_group_member(
+                                    &group_id, &member_id, Some(&our_member_id), reason.as_deref()
+                                ) {
+                                    warn!(error = %e, "Failed to persist ban to database");
+                                }
+                                info!(group_id = ?group_id, member_id = ?member_id, "Banned member from group");
+                            }
+                            Err(e) => {
+                                warn!(group_id = ?group_id, member_id = ?member_id, error = %e, "Failed to ban member");
+                                let _ = event_tx.send(DaemonEvent::Error {
+                                    message: format!("Failed to ban member: {}", e),
+                                });
+                            }
+                        }
+                    } else {
+                        warn!(group_id = ?group_id, "Group not found for ban");
                     }
                 }
             }
@@ -2836,6 +2903,7 @@ impl MessagingDaemon {
                     content: received.content.clone(),
                     timestamp: received.timestamp,
                     outgoing: false,
+                    disappear_after: None,
                 };
                 let db = database.lock().await;
                 if let Err(e) = db.store_group_message(&group_id, &received_msg) {

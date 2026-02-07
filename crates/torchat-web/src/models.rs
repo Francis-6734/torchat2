@@ -80,6 +80,8 @@ pub struct Message {
     pub timestamp: i64,
     pub is_outgoing: bool,
     pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disappear_after: Option<i64>,
 }
 
 /// API request to add contact
@@ -94,6 +96,7 @@ pub struct AddContactRequest {
 pub struct SendMessageRequest {
     pub to: String,
     pub content: String,
+    pub disappear_after: Option<i64>,
 }
 
 /// File transfer info
@@ -148,6 +151,8 @@ pub struct GroupMessageInfo {
     pub content: String,
     pub timestamp: i64,
     pub outgoing: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disappear_after: Option<i64>,
 }
 
 /// Create group request
@@ -174,12 +179,35 @@ pub struct JoinGroupRequest {
 #[derive(Debug, Deserialize)]
 pub struct SendGroupMessageRequest {
     pub content: String,
+    pub disappear_after: Option<i64>,
 }
 
 /// Promote member to admin request
 #[derive(Debug, Deserialize)]
 pub struct PromoteMemberRequest {
     pub member_id: String, // Hex-encoded 16-byte member ID
+}
+
+/// Remove/ban member request
+#[derive(Debug, Deserialize)]
+pub struct RemoveMemberRequest {
+    pub member_id: String,
+    pub ban: Option<bool>,
+    pub reason: Option<String>,
+}
+
+/// Unban member request
+#[derive(Debug, Deserialize)]
+pub struct UnbanMemberRequest {
+    pub member_id: String,
+}
+
+/// Ban information for API responses
+#[derive(Debug, Clone, Serialize)]
+pub struct BanInfo {
+    pub member_id: String,
+    pub reason: Option<String>,
+    pub banned_at: i64,
 }
 
 /// Group file information for API responses
@@ -208,6 +236,12 @@ pub struct PendingInviteInfo {
 }
 
 
+/// Search query parameters
+#[derive(Debug, Deserialize)]
+pub struct SearchQuery {
+    pub q: String,
+}
+
 /// API response
 #[derive(Debug, Serialize)]
 pub struct ApiResponse<T: Serialize> {
@@ -232,4 +266,14 @@ impl<T: Serialize> ApiResponse<T> {
             error: None,
         }
     }
+}
+
+/// WebSocket event pushed to the browser
+#[derive(Debug, Clone, Serialize)]
+pub struct WsEvent {
+    /// Event type identifier (e.g., "message_received", "group_message_received")
+    #[serde(rename = "type")]
+    pub event_type: String,
+    /// Event-specific payload
+    pub data: serde_json::Value,
 }
