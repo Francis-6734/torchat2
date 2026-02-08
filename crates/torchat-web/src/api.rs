@@ -4491,7 +4491,7 @@ async fn handle_ws_connection(
 
 /// Convert a DaemonEvent to a WsEvent suitable for the browser.
 /// Returns None for internal-only events that the frontend does not need.
-fn daemon_event_to_ws_event(event: torchat_core::messaging::DaemonEvent) -> Option<WsEvent> {
+pub fn daemon_event_to_ws_event(event: torchat_core::messaging::DaemonEvent) -> Option<WsEvent> {
     use torchat_core::messaging::DaemonEvent;
 
     match event {

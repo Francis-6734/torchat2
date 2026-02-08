@@ -39,6 +39,18 @@ axum-extra = { version = "0.9", features = ["multipart"] }
 tokio-util = { version = "0.7", features = ["io"] }
 futures-util = "0.3"
 
+# Also expose as a library for integration tests
+[lib]
+name = "torchat_web"
+path = "src/lib.rs"
+
 [[bin]]
 name = "torchat-web"
 path = "src/main.rs"
+
+[dev-dependencies]
+tokio = { workspace = true }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+serde_json = "1"
+http = "1"

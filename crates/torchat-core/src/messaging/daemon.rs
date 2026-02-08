@@ -615,6 +615,11 @@ impl MessagingDaemon {
         self.event_tx.subscribe()
     }
 
+    /// Get the event sender (for testing and internal use).
+    pub fn event_sender(&self) -> broadcast::Sender<DaemonEvent> {
+        self.event_tx.clone()
+    }
+
     /// Get our onion address.
     pub fn onion_address(&self) -> &OnionAddress {
         self.identity.onion_address()
